@@ -209,6 +209,12 @@ table { border-collapse: collapse; width: 100%; }
 .reason-after30 { color: var(--ask); }
 .reason-nodate { color: var(--muted); }
 
+/* --------------------------------------------------------------- report */
+.report-block { display: grid; gap: 0.6rem; padding-top: 0.5rem; }
+.report-block .sub { margin: 0; }
+.report-block h3 { margin: 0.6rem 0 0; font-size: 0.95rem; font-weight: 600; }
+.report-block .grid.compact { min-width: 0; }
+
 /* --------------------------------------------------------------- verifica */
 .review-progress { text-align: right; color: var(--muted); }
 .review-progress strong { display: block; font-size: 1.8rem; color: var(--ink); line-height: 1; }
@@ -367,6 +373,13 @@ details p { color: var(--muted); }
   .panel, .kpis, .table-wrap { border-color: #bbb; break-inside: avoid; }
   .two-col { grid-template-columns: 1fr; }
   .grid thead th { position: static; }
+  .report-block, .report-block .table-wrap { break-inside: auto; }
+  .report-block .panel-head { break-after: avoid; }
+  .grid tr { break-inside: avoid; }
+  .table-wrap > .grid { min-width: 0; }
+  .grid th, .grid td { padding: 4pt 6pt; font-size: 9pt; }
   a { color: inherit; }
   .footprint td, .rung, .dom-bar, .tag { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
 }
+.report-block .more { justify-self: start; }
+@media print { .report-block .more { display: none !important; } }

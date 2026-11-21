@@ -125,7 +125,7 @@ function renderLogin(message = '', email = '') {
 
 const NAV = [
   ['#/', 'Partner'], ['#/review', 'Verifica'], ['#/social', 'Pubblicazioni'], ['#/top', 'Top 30'],
-  ['#/new', 'Nuovi iscritti'], ['#/attention', 'Da attenzionare'], ['#/upload', 'Carica dati'],
+  ['#/new', 'Nuovi iscritti'], ['#/attention', 'Da attenzionare'], ['#/report', 'Report'], ['#/upload', 'Carica dati'],
 ];
 function currentSection() {
   const h = location.hash || '#/';
@@ -165,6 +165,8 @@ async function route() {
     if (profile.role === 'partner') return renderDetail(profile.partner_id, { partnerView: true });
     if (m) return renderDetail(m[1]);
     const section = currentSection();
+    if (section !== '#/report') state.report = null;
+    if (section === '#/report') return renderReport();
     if (section === '#/upload') return renderUpload();
     if (section === '#/review') return renderReview();
     if (section === '#/social') return renderSocial();
@@ -725,6 +727,192 @@ async function renderAttention() {
     ['Nome', 'Email', 'Codice', 'Tipo', 'Motivo', 'Attivo dal', 'Giorni dalla data dati', 'Valuta', 'Click', 'Utenti', 'Pubblicazioni confermate 30 gg', 'Account', 'Data dati'],
     rows.map(r => [r.name, r.email, r.affiliate_code, TYPE_LABEL[r.type], REASON[r.reason], r.activation_date || '', r.days ?? '', r.currency, r.clicks, r.users,
       r.confirmed_last_30d, accountLabel(r.account_status), asOf])));
+}
+
+// ---------------------------------------------------------------- Report per periodo
+// Periodi del report e colonna corrispondente del CSV affiliati (1S, 2S, 1M).
+const REPORT_PERIODS = [['7', '1w', '7 giorni'], ['14', '2w', '14 giorni'], ['30', '1m', '30 giorni']];
+
+async function renderReport() {
+  await ensureList();
+  const { rows: partners, asOf, ladders } = state.list;
+  if (!state.report) {
+    app.innerHTML = shell('<p class="loading">Preparazione del report…</p>');
+    bindShell();
+    const since = new Date(Date.now() - 30 * DAY).toISOString();
+    const [metrics, pubs] = await Promise.all([
+      asOf ? fetchAll(() => sb.from('commercial_metrics').select('partner_id, currency, windows').eq('as_of', asOf).order('partner_id')) : [],
+      fetchAll(() => sb.from('publications').select('id, partner_id, platform, format, category, published_at, title, url, review_status')
+        .gte('published_at', since).order('published_at', { ascending: false }).order('id')),
+    ]);
+    state.report = { metrics: new Map(metrics.map(m => [m.partner_id, m])), pubs, period: state.reportPeriod || '30', open: new Set() };
+  }
+  const R = state.report;
+  state.reportPeriod = R.period;
+  const [days, win, periodLabel] = REPORT_PERIODS.find(p => p[0] === R.period);
+  const byId = new Map(partners.map(p => [p.id, p]));
+  const hasWindows = [...R.metrics.values()].some(m => m.windows);
+  const w = (id, key) => Number(R.metrics.get(id)?.windows?.[key]?.[win] ?? 0);
+
+  // Dati commerciali del periodo (dal CSV)
+  const sales = partners
+    .map(p => ({ ...p, p_income: w(p.id, 'income'), p_orders: w(p.id, 'orders'), p_comm: w(p.id, 'commissions'), p_users: w(p.id, 'users') }))
+    .filter(p => p.p_income > 0 || p.p_orders > 0)
+    .sort((a, b) => b.p_income - a.p_income || a.name.localeCompare(b.name, 'it'));
+  const totals = {};
+  for (const p of sales) {
+    const t = totals[p.currency || 'UNSPECIFIED'] ||= { income: 0, orders: 0, comm: 0 };
+    t.income += p.p_income; t.orders += p.p_orders; t.comm += p.p_comm;
+  }
+  const orders = sales.reduce((t, p) => t + p.p_orders, 0);
+
+  // Nuove attivazioni: approvati negli N giorni fino alla data dei dati
+  const activations = partners
+    .filter(p => p.activation_date && asOf && daysBetween(p.activation_date, asOf) >= 0 && daysBetween(p.activation_date, asOf) < Number(days))
+    .sort((a, b) => b.activation_date.localeCompare(a.activation_date) || a.name.localeCompare(b.name, 'it'));
+
+  // Pubblicazioni negli ultimi N giorni fino a oggi
+  const since = new Date(Date.now() - Number(days) * DAY).toISOString();
+  const pubs = R.pubs.filter(x => x.published_at >= since);
+  const count = (list, s) => list.filter(x => x.review_status === s).length;
+  const confirmed = pubs.filter(x => x.review_status === 'confirmed');
+  const perPartner = new Map();
+  for (const x of pubs) {
+    const e = perPartner.get(x.partner_id) || { confirmed: 0, on_topic: 0, pending: 0, not_relevant: 0, platforms: new Set() };
+    e[x.review_status]++;
+    if (x.review_status === 'confirmed' || x.review_status === 'on_topic') e.platforms.add(x.platform);
+    perPartner.set(x.partner_id, e);
+  }
+  const pubRows = [...perPartner.entries()]
+    .filter(([, e]) => e.confirmed || e.on_topic || e.pending)
+    .map(([id, e]) => ({ ...(byId.get(id) || { id, name: '–' }), ...e, p_income: w(id, 'income') }))
+    .sort((a, b) => b.confirmed - a.confirmed || b.on_topic - a.on_topic || b.pending - a.pending || a.name.localeCompare(b.name, 'it'));
+  const pending = count(pubs, 'pending');
+  const platforms = ['instagram', 'youtube', 'tiktok'].filter(p => p !== 'tiktok' || pubs.some(x => x.platform === 'tiktok'));
+
+  const today = new Date().toISOString().slice(0, 10);
+  const LIMIT = 20;
+  const cut = (key, list) => (R.open.has(key) ? list : list.slice(0, LIMIT));
+  const more = (key, list) => list.length > LIMIT
+    ? `<button class="btn btn-ghost more" data-more="${key}">${R.open.has(key) ? 'Mostra solo i primi ' + LIMIT : 'Mostra tutti (' + nf.format(list.length) + ')'}</button>` : '';
+  const pName = id => byId.get(id)?.name || '–';
+  const moneyTotals = Object.entries(totals).filter(([c]) => c !== 'UNSPECIFIED');
+
+  app.innerHTML = shell(`
+    <section class="list-head">
+      <div><h1>Report ultimi ${periodLabel}</h1>
+        <p class="sub">Dati commerciali dal CSV al ${esc(date(asOf))}. Pubblicazioni dal ${esc(date(since))} a oggi.</p></div>
+      <div class="actions">
+        <div class="seg" role="group" aria-label="Periodo">
+          ${REPORT_PERIODS.map(([v, , l]) => `<button data-rperiod="${v}" aria-pressed="${R.period === v}">${l}</button>`).join('')}
+        </div>
+        <button class="btn" id="print">Scarica PDF</button>
+      </div>
+    </section>
+    ${hasWindows ? '' : `<p class="notice">Per i numeri commerciali del periodo serve un CSV caricato dalla pagina <a href="#/upload">Carica dati</a>: i dati attuali vengono dallo Sheet e non hanno le colonne per periodo.</p>`}
+
+    <section class="kpis">
+      ${moneyTotals.length ? moneyTotals.map(([c, t]) => `<div class="kpi"><span class="kpi-label">Fatturato ${c}</span><span class="kpi-value">${money(t.income, c)}</span></div>`).join('')
+        : '<div class="kpi"><span class="kpi-label">Fatturato</span><span class="kpi-value">–</span></div>'}
+      <div class="kpi"><span class="kpi-label">Ordini</span><span class="kpi-value">${nf.format(orders)}</span></div>
+      <div class="kpi"><span class="kpi-label">Nuove attivazioni</span><span class="kpi-value">${nf.format(activations.length)}</span></div>
+      <div class="kpi"><span class="kpi-label">Pubblicazioni confermate</span><span class="kpi-value">${nf.format(confirmed.length)}</span></div>
+      <div class="kpi"><span class="kpi-label">In tema, senza prodotto</span><span class="kpi-value">${nf.format(count(pubs, 'on_topic'))}</span></div>
+      <p class="kpi-note">${nf.format(sales.length)} partner con vendite · ${nf.format(new Set(confirmed.map(x => x.partner_id)).size)} partner con pubblicazioni confermate${pending ? ` · <strong>${nf.format(pending)} pubblicazioni ancora da verificare</strong>: i conteggi possono salire` : ''}</p>
+    </section>
+
+    <section class="report-block">
+      <div class="panel-head"><h2>Dati commerciali</h2><button class="btn" data-csv="sales">Esporta CSV</button></div>
+      <p class="sub">Fatturato, ordini e commissioni degli ultimi ${periodLabel} secondo il CSV (colonna ${{ '1w': '1S', '2w': '2S', '1m': '1M' }[win]}). Solo partner con almeno una vendita.</p>
+      <div class="table-wrap"><table class="grid" id="r-sales"></table></div>${more('sales', sales)}
+    </section>
+
+    <section class="report-block">
+      <div class="panel-head"><h2>Nuove attivazioni</h2><button class="btn" data-csv="activations">Esporta CSV</button></div>
+      <p class="sub">Affiliati e partner approvati negli ultimi ${periodLabel} prima del ${esc(date(asOf))}.</p>
+      <div class="table-wrap"><table class="grid" id="r-act"></table></div>${more('act', activations)}
+    </section>
+
+    <section class="report-block">
+      <div class="panel-head"><h2>Pubblicazioni</h2><button class="btn" data-csv="pubs">Esporta CSV</button></div>
+      <p class="sub">Contenuti pubblicati negli ultimi ${periodLabel}. Le confermate contano per goal e onboarding; quelle in tema contano come attività.</p>
+      <div class="table-wrap"><table class="grid compact" id="r-plat"></table></div>
+      <div class="table-wrap"><table class="grid" id="r-pubp"></table></div>${more('pubp', pubRows)}
+      <h3>Pubblicazioni confermate</h3>
+      <div class="table-wrap"><table class="grid" id="r-pubs"></table></div>${more('pubs', confirmed)}
+    </section>
+  `);
+  bindShell();
+
+  simpleTable(document.getElementById('r-sales'), [
+    { label: 'Partner', cell: partnerCell },
+    { label: 'Tipo', cell: typeCell },
+    { label: 'Fatturato', num: true, cell: r => money(r.p_income, r.currency) },
+    { label: 'Ordini', num: true, cell: r => num(r.p_orders) },
+    { label: 'Commissioni', num: true, cell: r => money(r.p_comm, r.currency) },
+    { label: 'Nuovi utenti', num: true, cell: r => num(r.p_users) },
+    { label: 'Pubblicazioni confermate', num: true, cell: r => num(perPartner.get(r.id)?.confirmed || 0) },
+  ], cut('sales', sales), hasWindows ? `Nessuna vendita negli ultimi ${periodLabel}.` : 'Dati per periodo non disponibili.');
+
+  simpleTable(document.getElementById('r-act'), [
+    { label: 'Partner', cell: partnerCell },
+    { label: 'Tipo', cell: typeCell },
+    { label: 'Approvato il', cell: r => esc(date(r.activation_date)), cls: 'nowrap' },
+    { label: 'Fatturato', num: true, cell: r => money(w(r.id, 'income'), r.currency) },
+    { label: 'Ordini', num: true, cell: r => num(w(r.id, 'orders')) },
+    { label: 'Pubblicazioni confermate', num: true, cell: r => num(perPartner.get(r.id)?.confirmed || 0) },
+    { label: 'Onboarding', cell: r => ladder([...(ladders.get(r.id) || [])]) + `<span class="ladder-count">${r.onboarding_done}/${r.onboarding_total}</span>` },
+  ], cut('act', activations), `Nessuna nuova attivazione negli ultimi ${periodLabel}.`);
+
+  simpleTable(document.getElementById('r-plat'), [
+    { label: 'Social', cell: p => esc(PLATFORM_LABEL[p]) },
+    { label: 'Confermate', num: true, cell: p => num(count(pubs.filter(x => x.platform === p), 'confirmed')) },
+    { label: 'In tema', num: true, cell: p => num(count(pubs.filter(x => x.platform === p), 'on_topic')) },
+    { label: 'Da verificare', num: true, cell: p => num(count(pubs.filter(x => x.platform === p), 'pending')) },
+    { label: 'Non pertinenti', num: true, cell: p => num(count(pubs.filter(x => x.platform === p), 'not_relevant')) },
+  ], platforms, '');
+
+  simpleTable(document.getElementById('r-pubp'), [
+    { label: 'Partner', cell: partnerCell },
+    { label: 'Tipo', cell: typeCell },
+    { label: 'Confermate', num: true, cell: r => num(r.confirmed) },
+    { label: 'In tema', num: true, cell: r => num(r.on_topic) },
+    { label: 'Da verificare', num: true, cell: r => r.pending ? `<span class="pill-warn">${r.pending}</span>` : '0' },
+    { label: 'Social', cell: r => esc([...r.platforms].map(p => PLATFORM_LABEL[p]).join(', ') || '–') },
+    { label: 'Fatturato nel periodo', num: true, cell: r => money(r.p_income, r.currency) },
+  ], cut('pubp', pubRows), `Nessuna pubblicazione negli ultimi ${periodLabel}.`);
+
+  simpleTable(document.getElementById('r-pubs'), [
+    { label: 'Data', cell: x => esc(date(x.published_at)), cls: 'nowrap' },
+    { label: 'Partner', cell: x => `<a class="pname" href="#/p/${esc(x.partner_id)}">${esc(pName(x.partner_id))}</a>` },
+    { label: 'Social', cell: x => esc(PLATFORM_LABEL[x.platform]) },
+    { label: 'Formato', cell: x => esc(FORMAT_LABEL[x.format]) + (x.category ? `<span class="pmeta">${esc(CATEGORY_LABEL[x.category] || x.category)}</span>` : '') },
+    { label: 'Contenuto', cls: 'title-cell', cell: x => safeUrl(x.url) ? `<a href="${safeUrl(x.url)}" target="_blank" rel="noopener">${esc(x.title || 'Apri contenuto')}</a>` : esc(x.title) },
+  ], cut('pubs', confirmed), `Nessuna pubblicazione confermata negli ultimi ${periodLabel}.`);
+
+  ['r-sales', 'r-act', 'r-pubp'].forEach(clickable);
+  document.querySelectorAll('[data-more]').forEach(b => b.addEventListener('click', () => {
+    const k = b.dataset.more;
+    R.open.has(k) ? R.open.delete(k) : R.open.add(k);
+    const y = scrollY; renderReport(); scrollTo(0, y);
+  }));
+  document.querySelectorAll('[data-rperiod]').forEach(b => b.addEventListener('click', () => { R.period = b.dataset.rperiod; renderReport(); }));
+  document.getElementById('print').addEventListener('click', () => window.print());
+  const tag = `${days}gg-${asOf || today}`;
+  const csv = {
+    sales: () => downloadCsv(`report-commerciale-${tag}.csv`,
+      ['Nome', 'Email', 'Codice', 'Tipo', 'Valuta', `Fatturato ${periodLabel}`, `Ordini ${periodLabel}`, `Commissioni ${periodLabel}`, `Nuovi utenti ${periodLabel}`, 'Pubblicazioni confermate', 'Data dati'],
+      sales.map(r => [r.name, r.email, r.affiliate_code, TYPE_LABEL[r.type], r.currency, r.p_income, r.p_orders, r.p_comm, r.p_users, perPartner.get(r.id)?.confirmed || 0, asOf])),
+    activations: () => downloadCsv(`report-attivazioni-${tag}.csv`,
+      ['Nome', 'Email', 'Codice', 'Tipo', 'Approvato il', 'Valuta', `Fatturato ${periodLabel}`, `Ordini ${periodLabel}`, 'Pubblicazioni confermate', 'Onboarding completati', 'Onboarding totali', 'Data dati'],
+      activations.map(r => [r.name, r.email, r.affiliate_code, TYPE_LABEL[r.type], r.activation_date, r.currency, w(r.id, 'income'), w(r.id, 'orders'),
+        perPartner.get(r.id)?.confirmed || 0, r.onboarding_done, r.onboarding_total, asOf])),
+    pubs: () => downloadCsv(`report-pubblicazioni-${days}gg-${today}.csv`,
+      ['Data', 'Partner', 'Email', 'Codice', 'Tipo partner', 'Social', 'Formato', 'Tipo di contenuto', 'Titolo', 'URL', 'Stato'],
+      pubs.map(x => { const p = byId.get(x.partner_id) || {}; return [x.published_at.slice(0, 10), p.name, p.email, p.affiliate_code, TYPE_LABEL[p.type],
+        PLATFORM_LABEL[x.platform], FORMAT_LABEL[x.format], CATEGORY_LABEL[x.category] || '', x.title, x.url, REVIEW_LABEL[x.review_status]]; })),
+  };
+  document.querySelectorAll('[data-csv]').forEach(b => b.addEventListener('click', () => csv[b.dataset.csv]()));
 }
 
 // ---------------------------------------------------------------- Pubblicazioni social
