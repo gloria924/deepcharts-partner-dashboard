@@ -123,19 +123,31 @@ function renderLogin(message = '', email = '') {
   });
 }
 
+const NAV = [
+  ['#/', 'Partner'], ['#/social', 'Pubblicazioni'], ['#/top', 'Top 30'],
+  ['#/new', 'Nuovi iscritti'], ['#/attention', 'Da attenzionare'],
+];
+function currentSection() {
+  const h = location.hash || '#/';
+  if (h.startsWith('#/p/')) return '#/';
+  return NAV.some(([k]) => k === h) ? h : '#/';
+}
 function shell(content, { back = false } = {}) {
+  const staff = state.profile && (state.profile.role === 'admin' || state.profile.role === 'staff');
+  const active = currentSection();
   return `
     <header class="topbar">
       <div class="topbar-left">
-        ${back ? '<a class="back" href="#/">Tutti i partner</a>' : ''}
         <a class="brand" href="#/"><span class="brand-mark" aria-hidden="true"></span>DeepCharts <span class="brand-sub">Partner</span></a>
+        ${staff ? `<nav class="nav" aria-label="Sezioni">${NAV.map(([href, label]) =>
+          `<a href="${href}" ${href === active ? 'aria-current="page"' : ''}>${label}</a>`).join('')}</nav>` : ''}
       </div>
       <div class="topbar-right">
         <span class="user">${esc(state.session.user.email)}</span>
         <button class="btn btn-ghost" id="logout">Esci</button>
       </div>
     </header>
-    <main class="page">${content}</main>`;
+    <main class="page">${back ? '<a class="back" href="#/">Tutti i partner</a>' : ''}${content}</main>`;
 }
 function bindShell() {
   document.getElementById('logout')?.addEventListener('click', () => sb.auth.signOut());
@@ -152,6 +164,11 @@ async function route() {
     const m = location.hash.match(/^#\/p\/([0-9a-f-]{36})$/i);
     if (profile.role === 'partner') return renderDetail(profile.partner_id, { partnerView: true });
     if (m) return renderDetail(m[1]);
+    const section = currentSection();
+    if (section === '#/social') return renderSocial();
+    if (section === '#/top') return renderTop();
+    if (section === '#/new') return renderNew();
+    if (section === '#/attention') return renderAttention();
     return renderList();
   } catch (err) {
     app.innerHTML = shell(`<section class="empty"><h1>Dati non disponibili</h1><p>${esc(err.message || err)}</p><p><a class="btn" href="">Riprova</a></p></section>`);
@@ -202,12 +219,15 @@ function filteredRows() {
   return out;
 }
 
+async function ensureList() {
+  if (state.list) return;
+  app.innerHTML = shell('<p class="loading">Caricamento partner…</p>');
+  bindShell();
+  await loadList();
+}
+
 async function renderList() {
-  if (!state.list) {
-    app.innerHTML = shell('<p class="loading">Caricamento partner…</p>');
-    bindShell();
-    await loadList();
-  }
+  await ensureList();
   const f = state.filters;
   app.innerHTML = shell(`
     <section class="list-head">
@@ -529,6 +549,260 @@ async function renderDetail(id, { partnerView = false } = {}) {
     state.list = null;
     renderDetail(id, { partnerView });
   }));
+}
+
+// ---------------------------------------------------------------- utilità per le sezioni
+const DAY = 86400000;
+const daysBetween = (from, to) => Math.round((Date.parse(to + 'T00:00:00Z') - Date.parse(from + 'T00:00:00Z')) / DAY);
+const partnerCell = r => `<a class="pname" href="#/p/${esc(r.id)}">${esc(r.name)}</a><span class="pmeta">${esc(r.affiliate_code || r.email)}</span>`;
+const typeCell = r => `<span class="tag tag-${esc(r.type)}">${esc(TYPE_LABEL[r.type] || r.type)}</span>`;
+const accountLabel = v => (v === 'Enabled' ? 'Attivo' : v === 'Disabled' ? 'Disattivato' : v || '–');
+const num = v => (v == null ? '–' : nf.format(v));
+const isNewSignup = (r, asOf) => r.activation_date && daysBetween(r.activation_date, asOf) >= 0 && daysBetween(r.activation_date, asOf) <= 30;
+
+function simpleTable(el, columns, rows, emptyText) {
+  el.innerHTML = `<thead><tr>${columns.map(c => `<th scope="col" class="${c.num ? 'num' : ''}">${c.label}</th>`).join('')}</tr></thead>
+    <tbody>${rows.length ? rows.map(r => `<tr ${r.id ? `data-id="${esc(r.id)}" tabindex="0"` : ''}>${columns.map(c =>
+      `<td class="${c.num ? 'num' : ''} ${c.cls || ''}">${c.cell(r)}</td>`).join('')}</tr>`).join('')
+      : `<tr><td colspan="${columns.length}" class="empty-row">${emptyText}</td></tr>`}</tbody>`;
+  el.querySelectorAll('tbody tr[data-id]').forEach(tr => {
+    tr.addEventListener('click', e => { if (!e.target.closest('a')) location.hash = '#/p/' + tr.dataset.id; });
+    tr.addEventListener('keydown', e => { if (e.key === 'Enter') location.hash = '#/p/' + tr.dataset.id; });
+  });
+}
+const clickable = id => document.getElementById(id).classList.add('rows-link');
+
+function sectionHead(title, sub, exportLabel = 'Esporta CSV') {
+  return `<section class="list-head">
+    <div><h1>${title}</h1><p class="sub">${sub}</p></div>
+    <button class="btn" id="export">${exportLabel}</button>
+  </section>`;
+}
+
+// ---------------------------------------------------------------- Top 30
+async function renderTop() {
+  await ensureList();
+  const { rows: all, asOf } = state.list;
+  const currencies = ['USD', 'EUR'].filter(c => all.some(r => r.currency === c));
+  state.topCurrency ||= currencies[0] || 'USD';
+  const cur = state.topCurrency;
+  const pool = all.filter(r => r.currency === cur && r.income != null);
+  const top = [...pool].sort((a, b) => Number(b.income) - Number(a.income) || a.email.localeCompare(b.email)).slice(0, 30);
+  const totalPool = pool.reduce((t, r) => t + Number(r.income), 0);
+  const totalTop = top.reduce((t, r) => t + Number(r.income), 0);
+
+  app.innerHTML = shell(`
+    ${sectionHead('Top 30', `Fatturato cumulativo in ${cur}, dati CSV al ${esc(date(asOf))}. A parità di fatturato decide l'email.`)}
+    <section class="filters">
+      <div class="seg" role="group" aria-label="Valuta">
+        ${currencies.map(c => `<button data-cur="${c}" aria-pressed="${c === cur}">${c}</button>`).join('')}
+      </div>
+    </section>
+    <section class="summary">
+      <span><strong>${money(totalTop, cur)}</strong> fatturato dei primi 30</span>
+      <span><strong>${totalPool ? Math.round(totalTop / totalPool * 100) : 0}%</strong> del fatturato totale in ${cur}</span>
+      <span><strong>${nf.format(pool.length)}</strong> profili in ${cur}</span>
+    </section>
+    <div class="table-wrap"><table class="grid" id="top-table"></table></div>
+  `);
+  bindShell();
+  const columns = [
+    { label: '#', num: true, cell: r => `<span class="rank">${top.indexOf(r) + 1}</span>` },
+    { label: 'Fascia', cell: r => top.indexOf(r) < 15 ? '<span class="tier tier-1">Top 15</span>' : '<span class="tier tier-2">16–30</span>' },
+    { label: 'Partner', cell: partnerCell },
+    { label: 'Tipo', cell: typeCell },
+    { label: 'Fatturato', num: true, cell: r => {
+      const d = r.prev_income != null ? Number(r.income) - Number(r.prev_income) : null;
+      return money(r.income, cur) + (d ? `<span class="delta ${d > 0 ? 'up' : 'down'}">${d > 0 ? '+' : ''}${money(d, cur)}</span>` : '');
+    } },
+    { label: 'Ordini', num: true, cell: r => num(r.orders) },
+    { label: 'Click', num: true, cell: r => num(r.clicks) },
+    { label: 'Commissioni', num: true, cell: r => money(r.commissions, cur) },
+    { label: 'Attivo dal', cell: r => r.activation_date ? esc(date(r.activation_date)) : '<span class="muted">Non disponibile</span>', cls: 'nowrap' },
+    { label: 'Ultima pubblicazione confermata', cell: r => r.last_confirmed_at ? esc(date(r.last_confirmed_at)) : '<span class="muted">Nessuna</span>', cls: 'nowrap' },
+    { label: 'Account', cell: r => esc(accountLabel(r.account_status)) },
+  ];
+  simpleTable(document.getElementById('top-table'), columns, top, `Nessun profilo con fatturato in ${cur}.`);
+  clickable('top-table');
+  document.querySelectorAll('[data-cur]').forEach(b => b.addEventListener('click', () => { state.topCurrency = b.dataset.cur; renderTop(); }));
+  document.getElementById('export').addEventListener('click', () => downloadCsv(`top30-${cur}-${asOf}.csv`,
+    ['Posizione', 'Fascia', 'Nome', 'Email', 'Codice', 'Tipo', 'Valuta', 'Fatturato', 'Ordini', 'Click', 'Commissioni', 'Attivo dal', 'Ultima pubblicazione confermata', 'Account', 'Data dati'],
+    top.map((r, i) => [i + 1, i < 15 ? 'Top 15' : '16-30', r.name, r.email, r.affiliate_code, TYPE_LABEL[r.type], cur, r.income, r.orders, r.clicks, r.commissions,
+      r.activation_date || '', r.last_confirmed_at?.slice(0, 10) || '', accountLabel(r.account_status), asOf])));
+}
+
+// ---------------------------------------------------------------- Nuovi iscritti
+async function renderNew() {
+  await ensureList();
+  const { rows: all, asOf, ladders } = state.list;
+  const rows = all.filter(r => isNewSignup(r, asOf))
+    .sort((a, b) => b.activation_date.localeCompare(a.activation_date) || a.name.localeCompare(b.name, 'it'));
+  const withRevenue = rows.filter(r => Number(r.income) > 0).length;
+  const partners = rows.filter(r => r.type === 'Partner').length;
+
+  app.innerHTML = shell(`
+    ${sectionHead('Nuovi iscritti', `Attivati nei 30 giorni prima della data dei dati commerciali (${esc(date(asOf))}), compresi quelli che hanno già fatturato.`)}
+    <section class="summary">
+      <span><strong>${nf.format(rows.length)}</strong> nuovi iscritti</span>
+      <span><strong>${nf.format(partners)}</strong> partner</span>
+      <span><strong>${nf.format(withRevenue)}</strong> hanno già fatturato</span>
+    </section>
+    <div class="table-wrap"><table class="grid" id="new-table"></table></div>
+  `);
+  bindShell();
+  simpleTable(document.getElementById('new-table'), [
+    { label: 'Partner', cell: partnerCell },
+    { label: 'Tipo', cell: typeCell },
+    { label: 'Attivato il', cell: r => esc(date(r.activation_date)), cls: 'nowrap' },
+    { label: 'Giorni', num: true, cell: r => daysBetween(r.activation_date, asOf) },
+    { label: 'Fatturato', num: true, cell: r => money(r.income, r.currency) },
+    { label: 'Ordini', num: true, cell: r => num(r.orders) },
+    { label: 'Click', num: true, cell: r => num(r.clicks) },
+    { label: 'Utenti', num: true, cell: r => num(r.users) },
+    { label: 'Onboarding', cell: r => ladder([...(ladders.get(r.id) || [])]) + `<span class="ladder-count">${r.onboarding_done}/${r.onboarding_total}</span>` },
+    { label: 'Account', cell: r => esc(accountLabel(r.account_status)) },
+  ], rows, 'Nessun nuovo iscritto negli ultimi 30 giorni.');
+  clickable('new-table');
+  document.getElementById('export').addEventListener('click', () => downloadCsv(`nuovi-iscritti-${asOf}.csv`,
+    ['Nome', 'Email', 'Codice', 'Tipo', 'Attivato il', 'Giorni dalla data dati', 'Valuta', 'Fatturato', 'Ordini', 'Click', 'Utenti', 'Onboarding completati', 'Onboarding totali', 'Account', 'Data dati'],
+    rows.map(r => [r.name, r.email, r.affiliate_code, TYPE_LABEL[r.type], r.activation_date, daysBetween(r.activation_date, asOf), r.currency, r.income, r.orders, r.clicks, r.users,
+      r.onboarding_done, r.onboarding_total, accountLabel(r.account_status), asOf])));
+}
+
+// ---------------------------------------------------------------- Da attenzionare
+async function renderAttention() {
+  await ensureList();
+  const { rows: all, asOf } = state.list;
+  state.attention ||= { type: 'all', group: 'all' };
+  const f = state.attention;
+  const zero = all.filter(r => r.income != null && Number(r.income) === 0 && !isNewSignup(r, asOf))
+    .map(r => ({ ...r, reason: r.activation_date ? 'after30' : 'nodate', days: r.activation_date ? daysBetween(r.activation_date, asOf) : null }));
+  const counts = { after30: zero.filter(r => r.reason === 'after30').length, nodate: zero.filter(r => r.reason === 'nodate').length };
+  const rows = zero
+    .filter(r => (f.type === 'all' || r.type === f.type) && (f.group === 'all' || r.reason === f.group))
+    .sort((a, b) => (a.reason === b.reason ? 0 : a.reason === 'after30' ? -1 : 1) || (b.days ?? 0) - (a.days ?? 0) || Number(b.clicks || 0) - Number(a.clicks || 0));
+  const REASON = { after30: 'Zero fatturato dopo 30 giorni', nodate: 'Data di attivazione non disponibile' };
+
+  app.innerHTML = shell(`
+    ${sectionHead('Da attenzionare', `Profili a zero fatturato al ${esc(date(asOf))}, esclusi i nuovi iscritti degli ultimi 30 giorni. Chi non ha la data di attivazione è tenuto a parte: non si può dire da quanto è attivo.`)}
+    <section class="filters">
+      <div class="seg" role="group" aria-label="Motivo">
+        ${[['all', `Tutti (${zero.length})`], ['after30', `Dopo 30 giorni (${counts.after30})`], ['nodate', `Senza data (${counts.nodate})`]].map(([v, l]) =>
+          `<button data-group="${v}" aria-pressed="${f.group === v}">${l}</button>`).join('')}
+      </div>
+      <div class="seg" role="group" aria-label="Tipo">
+        ${[['all', 'Tutti'], ['Partner', 'Partner'], ['Affiliate', 'Affiliati']].map(([v, l]) =>
+          `<button data-atype="${v}" aria-pressed="${f.type === v}">${l}</button>`).join('')}
+      </div>
+    </section>
+    <section class="summary">
+      <span><strong>${nf.format(rows.length)}</strong> profili mostrati</span>
+      <span><strong>${nf.format(rows.filter(r => Number(r.clicks) > 0).length)}</strong> con click ma nessuna vendita</span>
+      <span><strong>${nf.format(rows.filter(r => r.confirmed_last_30d > 0).length)}</strong> hanno pubblicato negli ultimi 30 giorni</span>
+    </section>
+    <div class="table-wrap"><table class="grid" id="att-table"></table></div>
+  `);
+  bindShell();
+  simpleTable(document.getElementById('att-table'), [
+    { label: 'Partner', cell: partnerCell },
+    { label: 'Tipo', cell: typeCell },
+    { label: 'Motivo', cell: r => `<span class="reason reason-${r.reason}">${REASON[r.reason]}</span>` },
+    { label: 'Attivo dal', cell: r => r.activation_date ? esc(date(r.activation_date)) : '<span class="muted">Non disponibile</span>', cls: 'nowrap' },
+    { label: 'Giorni', num: true, cell: r => r.days ?? '–' },
+    { label: 'Click', num: true, cell: r => num(r.clicks) },
+    { label: 'Utenti', num: true, cell: r => num(r.users) },
+    { label: 'Pubblicazioni 30 gg', num: true, cell: r => nf.format(r.confirmed_last_30d) },
+    { label: 'Account', cell: r => esc(accountLabel(r.account_status)) },
+  ], rows, 'Nessun profilo da attenzionare con questi filtri.');
+  clickable('att-table');
+  document.querySelectorAll('[data-group]').forEach(b => b.addEventListener('click', () => { f.group = b.dataset.group; renderAttention(); }));
+  document.querySelectorAll('[data-atype]').forEach(b => b.addEventListener('click', () => { f.type = b.dataset.atype; renderAttention(); }));
+  document.getElementById('export').addEventListener('click', () => downloadCsv(`da-attenzionare-${asOf}.csv`,
+    ['Nome', 'Email', 'Codice', 'Tipo', 'Motivo', 'Attivo dal', 'Giorni dalla data dati', 'Valuta', 'Click', 'Utenti', 'Pubblicazioni confermate 30 gg', 'Account', 'Data dati'],
+    rows.map(r => [r.name, r.email, r.affiliate_code, TYPE_LABEL[r.type], REASON[r.reason], r.activation_date || '', r.days ?? '', r.currency, r.clicks, r.users,
+      r.confirmed_last_30d, accountLabel(r.account_status), asOf])));
+}
+
+// ---------------------------------------------------------------- Pubblicazioni social
+async function renderSocial() {
+  if (!state.social) {
+    app.innerHTML = shell('<p class="loading">Caricamento pubblicazioni…</p>');
+    bindShell();
+    const rows = await fetchAll(() => sb.from('publications')
+      .select('id, partner_id, platform, format, category, published_at, title, url, mention, review_status, partners(name, affiliate_code, type)')
+      .order('published_at', { ascending: false }).order('id'));
+    state.social = { rows, f: { platform: 'all', status: 'all', period: '30', format: 'all', q: '' } };
+  }
+  const { rows: all, f } = state.social;
+  const since = f.period === 'all' ? '' : new Date(Date.now() - Number(f.period) * DAY).toISOString();
+  const q = f.q.trim().toLowerCase();
+  const base = all.filter(x => (!since || x.published_at >= since) &&
+    (!q || [x.partners?.name, x.partners?.affiliate_code, x.title].some(v => (v || '').toLowerCase().includes(q))));
+  const byPlatform = base.filter(x => f.platform === 'all' || x.platform === f.platform);
+  const formats = [...new Set(byPlatform.map(x => x.format))];
+  if (f.format !== 'all' && !formats.includes(f.format)) f.format = 'all';
+  const rows = byPlatform.filter(x => (f.status === 'all' || x.review_status === f.status) && (f.format === 'all' || x.format === f.format));
+  const confirmed = byPlatform.filter(x => x.review_status === 'confirmed');
+  const activePartners = new Set(confirmed.map(x => x.partner_id)).size;
+  const withMention = confirmed.filter(x => x.mention === 'present').length;
+  const platformCount = p => base.filter(x => p === 'all' || x.platform === p).length;
+  const periodLabel = { '7': 'ultimi 7 giorni', '30': 'ultimi 30 giorni', '90': 'ultimi 90 giorni', all: 'tutto il periodo' }[f.period];
+
+  app.innerHTML = shell(`
+    ${sectionHead('Pubblicazioni social', `Contenuti dei partner raccolti dalle automazioni, ${periodLabel}.`)}
+    <nav class="tabs" aria-label="Social">
+      ${[['all', 'Tutti i social'], ['instagram', 'Instagram'], ['youtube', 'YouTube'], ['tiktok', 'TikTok']].map(([v, l]) =>
+        `<button data-platform="${v}" aria-pressed="${f.platform === v}">${l}<span class="count">${nf.format(platformCount(v))}</span></button>`).join('')}
+    </nav>
+    ${f.platform === 'tiktok' && !platformCount('tiktok') ? `<section class="empty-panel"><h2>TikTok non è ancora monitorato</h2>
+      <p>Quando aggiungeremo il workflow TikTok, i video dei partner compariranno qui insieme a Instagram e YouTube, con la stessa verifica.</p></section>` : `
+    <section class="kpis kpis-compact">
+      <div class="kpi"><span class="kpi-label">Confermate</span><span class="kpi-value">${nf.format(confirmed.length)}</span></div>
+      <div class="kpi"><span class="kpi-label">Da verificare</span><span class="kpi-value ${byPlatform.some(x => x.review_status === 'pending') ? 'warn' : ''}">${nf.format(byPlatform.filter(x => x.review_status === 'pending').length)}</span></div>
+      <div class="kpi"><span class="kpi-label">Partner con contenuti confermati</span><span class="kpi-value">${nf.format(activePartners)}</span></div>
+      <div class="kpi"><span class="kpi-label">Confermate con menzione nel testo</span><span class="kpi-value">${confirmed.length ? Math.round(withMention / confirmed.length * 100) : 0}%</span></div>
+    </section>
+    <section class="filters">
+      <input type="search" id="sq" placeholder="Cerca partner, codice o titolo" value="${esc(f.q)}" aria-label="Cerca">
+      <div class="seg" role="group" aria-label="Stato">
+        ${[['all', 'Tutte'], ['confirmed', 'Confermate'], ['pending', 'Da verificare'], ['not_relevant', 'Non pertinenti']].map(([v, l]) =>
+          `<button data-status="${v}" aria-pressed="${f.status === v}">${l}</button>`).join('')}
+      </div>
+      <select id="period" aria-label="Periodo">
+        ${[['7', 'Ultimi 7 giorni'], ['30', 'Ultimi 30 giorni'], ['90', 'Ultimi 90 giorni'], ['all', 'Tutto il periodo']].map(([v, l]) =>
+          `<option value="${v}" ${f.period === v ? 'selected' : ''}>${l}</option>`).join('')}
+      </select>
+      <select id="format" aria-label="Formato">
+        <option value="all">Tutti i formati</option>
+        ${formats.map(v => `<option value="${v}" ${f.format === v ? 'selected' : ''}>${esc(FORMAT_LABEL[v] || v)}</option>`).join('')}
+      </select>
+    </section>
+    <div class="table-wrap"><table class="grid" id="social-table"></table></div>
+    ${rows.length > 500 ? `<p class="legend">Mostrate le 500 più recenti su ${nf.format(rows.length)}. Restringi i filtri o usa l'export per l'elenco completo.</p>` : ''}`}
+  `);
+  bindShell();
+
+  document.querySelectorAll('[data-platform]').forEach(b => b.addEventListener('click', () => { f.platform = b.dataset.platform; renderSocial(); }));
+  if (f.platform === 'tiktok' && !platformCount('tiktok')) return document.getElementById('export').setAttribute('disabled', '');
+
+  simpleTable(document.getElementById('social-table'), [
+    { label: 'Data', cell: x => esc(date(x.published_at)), cls: 'nowrap' },
+    { label: 'Partner', cell: x => `<a class="pname" href="#/p/${esc(x.partner_id)}">${esc(x.partners?.name || '–')}</a><span class="pmeta">${esc(x.partners?.affiliate_code || '')}</span>` },
+    { label: 'Social', cell: x => esc(PLATFORM_LABEL[x.platform]) },
+    { label: 'Formato', cell: x => esc(FORMAT_LABEL[x.format]) },
+    { label: 'Contenuto', cls: 'title-cell', cell: x => safeUrl(x.url) ? `<a href="${safeUrl(x.url)}" target="_blank" rel="noopener">${esc(x.title || 'Apri contenuto')}</a>` : esc(x.title) },
+    { label: 'Menzione', cell: x => esc(MENTION_LABEL[x.mention] || '–') },
+    { label: 'Stato', cell: x => `<span class="status status-${esc(x.review_status)}">${esc(REVIEW_LABEL[x.review_status])}</span>` },
+  ], rows.slice(0, 500), 'Nessuna pubblicazione con questi filtri.');
+
+  document.getElementById('sq').addEventListener('change', e => { f.q = e.target.value; renderSocial(); });
+  document.querySelectorAll('[data-status]').forEach(b => b.addEventListener('click', () => { f.status = b.dataset.status; renderSocial(); }));
+  document.getElementById('period').addEventListener('change', e => { f.period = e.target.value; renderSocial(); });
+  document.getElementById('format').addEventListener('change', e => { f.format = e.target.value; renderSocial(); });
+  document.getElementById('export').addEventListener('click', () => downloadCsv(`pubblicazioni-${f.platform}-${new Date().toISOString().slice(0, 10)}.csv`,
+    ['Data', 'Partner', 'Codice', 'Tipo partner', 'Social', 'Formato', 'Titolo', 'URL', 'Menzione', 'Stato'],
+    rows.map(x => [x.published_at.slice(0, 10), x.partners?.name, x.partners?.affiliate_code, TYPE_LABEL[x.partners?.type], PLATFORM_LABEL[x.platform],
+      FORMAT_LABEL[x.format], x.title, x.url, MENTION_LABEL[x.mention] || '', REVIEW_LABEL[x.review_status]])));
 }
 
 boot();
