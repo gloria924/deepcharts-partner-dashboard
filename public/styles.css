@@ -249,6 +249,26 @@ kbd { font: 600 0.7rem var(--font); display: inline-block; min-width: 1.2rem; pa
 .linklike:focus-visible { outline: 2px solid var(--violet-text); }
 @media (max-width: 900px) { .review { grid-template-columns: 1fr; } .ig-embed { height: 520px; } .decide { grid-template-columns: 1fr 1fr; } }
 
+/* --------------------------------------------------------------- caricamento CSV */
+.dropzone { display: grid; place-items: center; gap: 0.3rem; padding: 2.5rem 1rem; border: 1.5px dashed var(--line-strong); border-radius: var(--radius-m); background: var(--surface); cursor: pointer; text-align: center; }
+.dropzone span { color: var(--muted); font-size: 0.9rem; }
+.dropzone:hover, .dropzone.over { border-color: var(--violet); background: var(--surface-2); }
+.notice { border: 1px solid var(--line-strong); border-radius: var(--radius-s); padding: 0.75rem 1rem; font-size: 0.9rem; background: var(--bg); }
+.notice ul { margin: 0.25rem 0 0; padding-left: 1.1rem; }
+.notice-err { border-color: var(--ask); background: var(--ask-soft); }
+details { font-size: 0.9rem; }
+details summary { cursor: pointer; color: var(--violet-text); }
+details p { color: var(--muted); }
+.upload-confirm { display: flex; gap: 1rem; align-items: center; flex-wrap: wrap; }
+.upload-confirm label { display: flex; gap: 0.5rem; align-items: center; font-size: 0.9rem; }
+.upload-confirm input[type=date] { font: 400 0.95rem var(--font); color: var(--ink); background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-s); padding: 0.45rem 0.6rem; }
+.upload-confirm p { margin: 0; flex: 1 1 260px; font-size: 0.85rem; }
+.grid.compact td, .grid.compact th { padding: 0.45rem 0.75rem; font-size: 0.85rem; }
+.windows { grid-column: 1 / -1; display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); border-top: 1px solid var(--line); }
+.windows > div { padding: 0.7rem 1.1rem; display: grid; gap: 0.1rem; }
+.windows strong { font-size: 1.05rem; font-weight: 600; }
+.windows .muted { font-size: 0.78rem; }
+
 /* --------------------------------------------------------------- scheda */
 .kpis {
   display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));

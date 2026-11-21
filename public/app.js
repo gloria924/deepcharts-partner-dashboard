@@ -125,7 +125,7 @@ function renderLogin(message = '', email = '') {
 
 const NAV = [
   ['#/', 'Partner'], ['#/review', 'Verifica'], ['#/social', 'Pubblicazioni'], ['#/top', 'Top 30'],
-  ['#/new', 'Nuovi iscritti'], ['#/attention', 'Da attenzionare'],
+  ['#/new', 'Nuovi iscritti'], ['#/attention', 'Da attenzionare'], ['#/upload', 'Carica dati'],
 ];
 function currentSection() {
   const h = location.hash || '#/';
@@ -165,6 +165,7 @@ async function route() {
     if (profile.role === 'partner') return renderDetail(profile.partner_id, { partnerView: true });
     if (m) return renderDetail(m[1]);
     const section = currentSection();
+    if (section === '#/upload') return renderUpload();
     if (section === '#/review') return renderReview();
     if (section === '#/social') return renderSocial();
     if (section === '#/top') return renderTop();
@@ -406,6 +407,8 @@ async function renderDetail(id, { partnerView = false } = {}) {
       ${kpi('Click', 'clicks', v => nf.format(v))}
       ${kpi('Utenti', 'users', v => nf.format(v))}
       ${kpi('Demo', 'demos', v => nf.format(v))}
+      ${latest?.windows?.income ? `<div class="windows">${[['1m', 'Ultimo mese'], ['2w', 'Ultime 2 settimane'], ['1w', 'Ultima settimana'], ['3m', 'Ultimi 3 mesi']].map(([k, l]) =>
+        `<div><span class="kpi-label">${l}</span><strong>${money(latest.windows.income[k], cur)}</strong><span class="muted">${nf.format(latest.windows.orders?.[k] ?? 0)} ordini</span></div>`).join('')}</div>` : ''}
       <p class="kpi-note">${latest ? `Valori cumulativi dal CSV del ${esc(date(latest.as_of))}.${metrics.length > 1 ? ` Storico disponibile: ${metrics.length} caricamenti.` : ''}` : 'Nessun dato commerciale per questo partner.'}</p>
     </section>
 
@@ -992,5 +995,177 @@ document.addEventListener('keydown', e => {
   else if (k === 'z') { e.preventDefault(); undoReview(); }
   else if (CATEGORY_KEYS[k]) { e.preventDefault(); setCategory(CATEGORY_KEYS[k]); }
 });
+
+// ---------------------------------------------------------------- Carica dati commerciali (CSV)
+const CSV_REQUIRED = ['Email', 'Name', 'Manager', 'Creation', 'Code', 'Type', 'Currency', 'Disabled', 'Clicks',
+  'Users Tot', 'Orders Tot', 'Demo Tot', 'Demo 3M', 'Income Tot', 'Commissions Tot', 'Pending commissions Tot'];
+const WINDOW_SUFFIX = { '3M': '3m', '1M': '1m', '2S': '2w', '1S': '1w' };
+const WINDOW_METRICS = { users: 'Users', orders: 'Orders', demos: 'Demo', income: 'Income', commissions: 'Commissions', pending: 'Pending commissions' };
+
+function parseDelimited(text) {
+  text = text.replace(/^﻿/, '');
+  const delim = (text.split(/\r?\n/)[0].match(/;/g) || []).length >= (text.split(/\r?\n/)[0].match(/,/g) || []).length ? ';' : ',';
+  const rows = []; let row = [], field = '', quoted = false;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (quoted) {
+      if (c === '"') { if (text[i + 1] === '"') { field += '"'; i++; } else quoted = false; }
+      else field += c;
+    } else if (c === '"' && field === '') quoted = true;
+    else if (c === delim) { row.push(field); field = ''; }
+    else if (c === '\n' || c === '\r') {
+      if (c === '\r' && text[i + 1] === '\n') i++;
+      row.push(field); field = '';
+      if (row.some(v => v !== '')) rows.push(row);
+      row = [];
+    } else field += c;
+  }
+  if (field !== '' || row.length) { row.push(field); if (row.some(v => v !== '')) rows.push(row); }
+  return rows;
+}
+
+function buildImport(text) {
+  const rows = parseDelimited(text);
+  const errors = [], warnings = [];
+  if (rows.length < 2) return { errors: ['Il file è vuoto o non è un CSV.'], warnings, records: [] };
+  const header = rows[0].map(h => h.trim());
+  const missing = CSV_REQUIRED.filter(h => !header.includes(h));
+  if (missing.length) return { errors: [`Mancano queste colonne: ${missing.join(', ')}. È l'export affiliati di DeepCharts?`], warnings, records: [] };
+  const col = Object.fromEntries(header.map((h, i) => [h, i]));
+  const records = [], seen = new Set();
+  rows.slice(1).forEach((r, idx) => {
+    const line = idx + 2;
+    if (r.length !== header.length) { errors.push(`Riga ${line}: ${r.length} colonne invece di ${header.length}.`); return; }
+    const get = h => (r[col[h]] ?? '').trim();
+    const email = get('Email').toLowerCase();
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) { errors.push(`Riga ${line}: email non valida (${get('Email') || 'vuota'}).`); return; }
+    if (seen.has(email)) { errors.push(`Riga ${line}: email ripetuta (${email}).`); return; }
+    seen.add(email);
+    const int = h => {
+      const v = get(h);
+      if (v === '') return 0;
+      if (!/^-?\d+(\.\d+)?$/.test(v)) { errors.push(`Riga ${line}: valore non numerico in ${h} (${v}).`); return 0; }
+      return Number(v);
+    };
+    const windows = {};
+    for (const [key, prefix] of Object.entries(WINDOW_METRICS)) {
+      windows[key] = {};
+      for (const [suffix, w] of Object.entries(WINDOW_SUFFIX)) if (col[`${prefix} ${suffix}`] !== undefined) windows[key][w] = int(`${prefix} ${suffix}`);
+    }
+    const creation = get('Creation');
+    const cur = get('Currency').toUpperCase();
+    records.push({
+      email, name: get('Name'), manager: get('Manager'), code: get('Code'),
+      type: get('Type'), currency: ['USD', 'EUR'].includes(cur) ? cur : 'UNSPECIFIED',
+      account_status: get('Disabled') === '1' ? 'Disabled' : 'Enabled',
+      activation_date: /^\d{4}-\d{2}-\d{2}$/.test(creation) && creation > '2001-01-01' ? creation : null,
+      clicks: int('Clicks'), users: int('Users Tot'), orders: int('Orders Tot'), demos: int('Demo Tot'), demos_3m: int('Demo 3M'),
+      income: int('Income Tot'), commissions: int('Commissions Tot'), pending: int('Pending commissions Tot'), windows,
+    });
+  });
+  const noCurrency = records.filter(x => x.currency === 'UNSPECIFIED').length;
+  if (noCurrency) warnings.push(`${noCurrency} ${noCurrency === 1 ? 'profilo' : 'profili'} senza valuta nel file: ${noCurrency === 1 ? 'resta' : 'restano'} con valuta non definita, come oggi.`);
+  return { errors, warnings, records };
+}
+
+function dateFromFileName(name) {
+  const m = String(name).match(/(20\d{2})(\d{2})(\d{2})/);
+  return m ? `${m[1]}-${m[2]}-${m[3]}` : new Date().toISOString().slice(0, 10);
+}
+
+async function renderUpload() {
+  await ensureList();
+  const { data: runs } = await sb.from('sync_runs').select('id, started_at, data_as_of, status, details').eq('source', 'csv_upload').order('id', { ascending: false }).limit(10);
+  const latest = state.list.asOf;
+  app.innerHTML = shell(`
+    <section class="list-head">
+      <div><h1>Carica dati commerciali</h1>
+      <p class="sub">Trascina l'export affiliati (CSV) così come lo scarichi. Prima di salvare vedi un'anteprima con i controlli. Ultimo caricamento: ${esc(date(latest))}.</p></div>
+    </section>
+    <label class="dropzone" id="dropzone">
+      <input type="file" id="csv-file" accept=".csv,text/csv" hidden>
+      <strong>Trascina qui il file CSV</strong>
+      <span>oppure clicca per sceglierlo dal computer</span>
+    </label>
+    <section id="preview"></section>
+    <section class="panel">
+      <h2>Ultimi caricamenti</h2>
+      ${runs?.length ? `<div class="table-wrap"><table class="grid compact"><thead><tr><th>Quando</th><th>Data dei dati</th><th>File</th><th class="num">Profili</th><th class="num">Nuovi</th></tr></thead><tbody>
+        ${runs.map(r => `<tr><td class="nowrap">${esc(new Date(r.started_at).toLocaleString('it-IT', { dateStyle: 'short', timeStyle: 'short' }))}</td><td>${esc(date(r.data_as_of))}</td>
+          <td>${esc(r.details?.file || '')}</td><td class="num">${nf.format(r.details?.righe ?? 0)}</td><td class="num">${nf.format(r.details?.partner_nuovi ?? 0)}</td></tr>`).join('')}
+      </tbody></table></div>` : '<p class="muted">Nessun caricamento dalla dashboard finora: i dati attuali arrivano dallo Sheet.</p>'}
+    </section>
+  `);
+  bindShell();
+  const input = document.getElementById('csv-file');
+  const zone = document.getElementById('dropzone');
+  const handle = file => file && file.text().then(text => previewImport(file.name, text));
+  input.addEventListener('change', () => handle(input.files[0]));
+  zone.addEventListener('dragover', e => { e.preventDefault(); zone.classList.add('over'); });
+  zone.addEventListener('dragleave', () => zone.classList.remove('over'));
+  zone.addEventListener('drop', e => { e.preventDefault(); zone.classList.remove('over'); handle(e.dataTransfer.files[0]); });
+}
+
+function previewImport(fileName, text) {
+  const { errors, warnings, records } = buildImport(text);
+  const el = document.getElementById('preview');
+  const { rows: current, asOf: latest } = state.list;
+  const byEmail = new Map(current.map(r => [r.email, r]));
+  const fileEmails = new Set(records.map(r => r.email));
+  const added = records.filter(r => !byEmail.has(r.email));
+  const gone = current.filter(r => r.metrics_as_of === latest && !fileEmails.has(r.email));
+  const dropped = records.filter(r => {
+    const old = byEmail.get(r.email);
+    return old && old.currency === r.currency && old.income != null && r.income < Number(old.income);
+  });
+  const totals = (list, f) => list.reduce((t, r) => { const c = f(r).cur; if (c !== 'UNSPECIFIED') t[c] = (t[c] || 0) + Number(f(r).v || 0); return t; }, {});
+  const tNew = totals(records, r => ({ cur: r.currency, v: r.income }));
+  const tOld = totals(current.filter(r => r.metrics_as_of === latest), r => ({ cur: r.currency, v: r.income }));
+  const asOfGuess = dateFromFileName(fileName);
+  const lastCount = current.filter(r => r.metrics_as_of === latest).length;
+  const blockedByCount = lastCount > 0 && records.length < lastCount * 0.8;
+  if (gone.length) warnings.push(gone.length === 1 ? `1 profilo presente nell'ultimo caricamento non è nel file: resta in dashboard con i dati precedenti.` : `${gone.length} profili presenti nell'ultimo caricamento non sono nel file: restano in dashboard con i dati precedenti.`);
+  if (dropped.length) warnings.push(dropped.length === 1 ? `1 profilo ha il fatturato totale più basso di prima (di solito per un rimborso): controlla sotto.` : `${dropped.length} profili hanno il fatturato totale più basso di prima (di solito per rimborsi): controlla l'elenco sotto.`);
+  if (blockedByCount) errors.push('Il file ha oltre il 20% di profili in meno dell\'ultimo caricamento: probabilmente è un export parziale.');
+
+  el.innerHTML = `
+    <section class="panel">
+      <div class="panel-head"><h2>Anteprima: ${esc(fileName)}</h2><span class="panel-figure">${nf.format(records.length)}<small> profili</small></span></div>
+      ${errors.length ? `<div class="notice notice-err"><strong>Il file non si può caricare</strong><ul>${errors.slice(0, 12).map(e => `<li>${esc(e)}</li>`).join('')}</ul>${errors.length > 12 ? `<p>e altri ${errors.length - 12} errori.</p>` : ''}</div>` : ''}
+      ${warnings.length ? `<div class="notice"><ul>${warnings.map(w => `<li>${esc(w)}</li>`).join('')}</ul></div>` : ''}
+      <div class="kpis kpis-compact">
+        <div class="kpi"><span class="kpi-label">Nuovi profili</span><span class="kpi-value">${nf.format(added.length)}</span></div>
+        <div class="kpi"><span class="kpi-label">Non più nel file</span><span class="kpi-value">${nf.format(gone.length)}</span></div>
+        ${['USD', 'EUR'].map(c => `<div class="kpi"><span class="kpi-label">Fatturato totale ${c}</span><span class="kpi-value">${money(tNew[c] || 0, c)}</span>
+          ${tOld[c] != null ? `<span class="delta ${(tNew[c] || 0) >= tOld[c] ? 'up' : 'down'}">${(tNew[c] || 0) >= tOld[c] ? '+' : ''}${money((tNew[c] || 0) - tOld[c], c)} dal ${esc(date(latest))}</span>` : ''}</div>`).join('')}
+      </div>
+      ${added.length ? `<details><summary>Nuovi profili (${added.length})</summary><p>${added.map(r => esc(r.name || r.email) + ' (' + esc(r.type) + ')').join(', ')}</p></details>` : ''}
+      ${gone.length ? `<details><summary>Non più nel file (${gone.length})</summary><p>${gone.map(r => esc(r.name)).join(', ')}</p></details>` : ''}
+      ${dropped.length ? `<details><summary>Fatturato in calo (${dropped.length})</summary><p>${dropped.map(r => `${esc(r.name || r.email)}: ${money(byEmail.get(r.email).income, r.currency)} → ${money(r.income, r.currency)}`).join(', ')}</p></details>` : ''}
+      <div class="upload-confirm">
+        <label>Data dei dati <input type="date" id="asof" value="${esc(asOfGuess)}" max="${new Date().toISOString().slice(0, 10)}"></label>
+        <p class="muted" id="asof-note"></p>
+        <button class="btn btn-primary" id="do-import" ${errors.length ? 'disabled' : ''}>Salva ${nf.format(records.length)} profili</button>
+      </div>
+    </section>`;
+  const asofInput = document.getElementById('asof');
+  const note = () => {
+    const v = asofInput.value;
+    const n = document.getElementById('asof-note');
+    if (latest && v < latest) { n.textContent = `Data precedente all'ultimo caricamento (${date(latest)}): non si può salvare.`; n.className = 'form-error'; }
+    else if (v === latest) { n.textContent = `Stessa data dell'ultimo caricamento: i nuovi valori lo sostituiscono.`; n.className = 'muted'; }
+    else { n.textContent = `Diventa un nuovo punto nello storico: le variazioni si calcolano rispetto al ${date(latest)}.`; n.className = 'muted'; }
+  };
+  asofInput.addEventListener('change', note); note();
+  document.getElementById('do-import').addEventListener('click', async e => {
+    const btn = e.currentTarget;
+    btn.disabled = true; btn.textContent = 'Salvataggio in corso…';
+    const { data, error } = await sb.rpc('import_commercial_csv', { p_as_of: asofInput.value, p_file_name: fileName, p_rows: records });
+    if (error) { btn.disabled = false; btn.textContent = `Salva ${nf.format(records.length)} profili`; return toast('Caricamento non riuscito: ' + error.message, 'err'); }
+    state.list = null; state.social = null;
+    toast(`Dati del ${date(data.data_as_of)} salvati: ${nf.format(data.metriche_scritte)} profili, ${nf.format(data.partner_nuovi)} nuovi`);
+    renderUpload();
+  });
+}
 
 boot();
