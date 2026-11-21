@@ -1,6 +1,6 @@
 {
   // Sito statico servito da Cloudflare (Workers static assets): nessuna build.
-  "name": "deepcharts-partner-dashboard",
+  "name": "deepcharts-affiliate-dashboard",
   "compatibility_date": "2026-11-01",
   "assets": {
     "directory": "./public"

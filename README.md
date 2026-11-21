@@ -9,7 +9,7 @@ Dashboard interna per partner e affiliati DeepCharts. Pagine statiche (HTML, CSS
 - `wrangler.jsonc`: dice a Cloudflare di pubblicare la cartella `public` così com'è
 
 ## Pubblicazione su Cloudflare
-Progetto Cloudflare Workers collegato a questo repo (gloria924/deepcharts-partner-dashboard).
+Worker Cloudflare `deepcharts-affiliate-dashboard` (https://deepcharts-affiliate-dashboard.gloria-fe5.workers.dev), collegato a questo repo (gloria924/deepcharts-partner-dashboard).
 Build command vuoto, deploy command `npx wrangler deploy`. Ogni push su `main` ripubblica il sito.
 
 ## Accesso
