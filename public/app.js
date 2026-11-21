@@ -18,7 +18,7 @@ const monthLabel = d => new Date(d + 'T00:00:00Z').toLocaleDateString('it-IT', {
 const TYPE_LABEL = { Partner: 'Partner', Affiliate: 'Affiliato', Unspecified: 'Non definito' };
 const FORMAT_LABEL = { video: 'Video', short: 'Short', live: 'Live', post: 'Post', reel: 'Reel', carousel: 'Carosello', story: 'Storia', other: 'Altro' };
 const PLATFORM_LABEL = { youtube: 'YouTube', instagram: 'Instagram', tiktok: 'TikTok', x: 'X', other: 'Altro' };
-const REVIEW_LABEL = { confirmed: 'Confermata', not_relevant: 'Non pertinente', pending: 'Da verificare' };
+const REVIEW_LABEL = { confirmed: 'Confermata', on_topic: 'In tema, senza prodotto', not_relevant: 'Non pertinente', pending: 'Da verificare' };
 const MENTION_LABEL = { present: 'Presente', not_detected: 'Non rilevata', not_applicable: 'Non applicabile' };
 
 async function fetchAll(build, pageSize = 1000) {
@@ -444,7 +444,7 @@ async function renderDetail(id, { partnerView = false } = {}) {
         </div>
         <p class="panel-note">${currentMonth?.all_goals_met
           ? `Questo mese tutti i goal sono raggiunti: commissione +${uplift}%.`
-          : `Con tutti e 4 i goal raggiunti nel mese la commissione sale del ${uplift}% (${p.type === 'Partner' ? 'partner' : 'affiliati'}). Conta solo le pubblicazioni confermate.`}</p>
+          : `Con tutti e 4 i goal raggiunti nel mese la commissione sale del ${uplift}% (${p.type === 'Partner' ? 'partner' : 'affiliati'}). Contano solo le pubblicazioni confermate, non quelle in tema senza prodotto.`}</p>
         <div class="table-wrap">
           <table class="footprint">
             <thead><tr><th scope="col">Goal</th>${months.map(m => `<th scope="col">${esc(monthLabel(m))}</th>`).join('')}</tr></thead>
@@ -460,7 +460,7 @@ async function renderDetail(id, { partnerView = false } = {}) {
             </tbody>
           </table>
         </div>
-        ${ytFormatsUnclassified ? `<p class="panel-note muted">${ytFormatsUnclassified} video YouTube confermati non sono ancora classificati come tutorial, dedicati o live, quindi non contano per il goal video.</p>` : ''}
+        ${ytFormatsUnclassified ? `<p class="panel-note muted">${ytFormatsUnclassified} video YouTube confermati non hanno ancora un tipo (educativo, dedicato o live): li classifichi nella coda di verifica, altrimenti non contano per il goal video.</p>` : ''}
       </section>
     </div>
 
@@ -468,7 +468,7 @@ async function renderDetail(id, { partnerView = false } = {}) {
       <div class="panel-head">
         <h2 id="pub-title">Pubblicazioni</h2>
         <div class="seg" role="group" aria-label="Stato verifica">
-          ${[['all', 'Tutte'], ['confirmed', 'Confermate'], ['pending', 'Da verificare'], ['not_relevant', 'Non pertinenti']].map(([v, l]) =>
+          ${[['all', 'Tutte'], ['confirmed', 'Confermate'], ['on_topic', 'In tema'], ['pending', 'Da verificare'], ['not_relevant', 'Non pertinenti']].map(([v, l]) =>
             `<button data-pub="${v}" aria-pressed="${v === (partnerView ? 'confirmed' : 'all')}">${l}</button>`).join('')}
         </div>
       </div>
@@ -510,7 +510,7 @@ async function renderDetail(id, { partnerView = false } = {}) {
       <tbody>${rows.length ? rows.slice(0, 300).map(x => `<tr>
         <td class="nowrap">${esc(date(x.published_at))}</td>
         <td>${esc(PLATFORM_LABEL[x.platform])}</td>
-        <td>${esc(FORMAT_LABEL[x.format])}</td>
+        <td>${esc(FORMAT_LABEL[x.format])}${x.category ? `<span class="pmeta">${esc(CATEGORY_LABEL[x.category] || x.category)}</span>` : ''}</td>
         <td class="title-cell">${safeUrl(x.url) ? `<a href="${safeUrl(x.url)}" target="_blank" rel="noopener">${esc(x.title || 'Apri contenuto')}</a>` : esc(x.title)}</td>
         <td>${esc(MENTION_LABEL[x.mention] || '–')}</td>
         <td><span class="status status-${esc(x.review_status)}">${esc(REVIEW_LABEL[x.review_status])}</span></td>
@@ -760,13 +760,14 @@ async function renderSocial() {
     <section class="kpis kpis-compact">
       <div class="kpi"><span class="kpi-label">Confermate</span><span class="kpi-value">${nf.format(confirmed.length)}</span></div>
       <div class="kpi"><span class="kpi-label">Da verificare</span><span class="kpi-value ${byPlatform.some(x => x.review_status === 'pending') ? 'warn' : ''}">${nf.format(byPlatform.filter(x => x.review_status === 'pending').length)}</span></div>
+      <div class="kpi"><span class="kpi-label">In tema, senza prodotto</span><span class="kpi-value">${nf.format(byPlatform.filter(x => x.review_status === 'on_topic').length)}</span></div>
       <div class="kpi"><span class="kpi-label">Partner con contenuti confermati</span><span class="kpi-value">${nf.format(activePartners)}</span></div>
       <div class="kpi"><span class="kpi-label">Confermate con menzione nel testo</span><span class="kpi-value">${confirmed.length ? Math.round(withMention / confirmed.length * 100) : 0}%</span></div>
     </section>
     <section class="filters">
       <input type="search" id="sq" placeholder="Cerca partner, codice o titolo" value="${esc(f.q)}" aria-label="Cerca">
       <div class="seg" role="group" aria-label="Stato">
-        ${[['all', 'Tutte'], ['confirmed', 'Confermate'], ['pending', 'Da verificare'], ['not_relevant', 'Non pertinenti']].map(([v, l]) =>
+        ${[['all', 'Tutte'], ['confirmed', 'Confermate'], ['on_topic', 'In tema'], ['pending', 'Da verificare'], ['not_relevant', 'Non pertinenti']].map(([v, l]) =>
           `<button data-status="${v}" aria-pressed="${f.status === v}">${l}</button>`).join('')}
       </div>
       <select id="period" aria-label="Periodo">
@@ -807,7 +808,7 @@ async function renderSocial() {
 }
 
 // ---------------------------------------------------------------- Verifica pubblicazioni
-const CATEGORY_LABEL = { tutorial: 'Tutorial', dedicated: 'Dedicato', live: 'Live', giveaway: 'Giveaway' };
+const CATEGORY_LABEL = { tutorial: 'Educativo', dedicated: 'Dedicato a DeepCharts', live: 'Live', giveaway: 'Giveaway' };
 const CATEGORY_KEYS = { 1: 'tutorial', 2: 'dedicated', 3: 'live', 4: 'giveaway' };
 const ytId = url => (String(url).match(/(?:v=|\/shorts\/|youtu\.be\/|\/live\/)([\w-]{11})/) || [])[1];
 const igPath = url => (String(url).match(/instagram\.com\/((?:p|reel|reels|tv)\/[\w-]+)/) || [])[1];
@@ -867,7 +868,7 @@ function drawReview() {
   app.innerHTML = shell(`
     <section class="list-head">
       <div><h1>Verifica pubblicazioni</h1>
-      <p class="sub">Conferma solo se DeepCharts, DeepDOM o DeepGamma si vedono a schermo. Prima i contenuti che li citano nel testo.</p></div>
+      <p class="sub">Conferma se DeepCharts, DeepDOM o DeepGamma sono riconoscibili: a schermo, anche solo un frame, a voce, in didascalia, con il codice affiliato o un tag. Se parla di orderflow senza nessun riferimento al prodotto, scegli In tema.</p></div>
       <div class="review-progress"><strong>${nf.format(queue.length)}</strong> da verificare${r.done ? `<span>${nf.format(r.done)} decise ora</span>` : ''}</div>
     </section>
     <nav class="tabs" aria-label="Social">
@@ -890,13 +891,14 @@ function drawReview() {
         <a class="btn" href="${safeUrl(x.url)}" target="_blank" rel="noopener">Apri contenuto</a>
 
         <fieldset class="cats">
-          <legend>Categoria <span class="muted">(facoltativa, conta per goal e onboarding)</span></legend>
+          <legend>Tipo di contenuto <span class="muted">(facoltativo: Educativo e Dedicato contano per il goal video sui video YouTube, Giveaway per l'onboarding)</span></legend>
           ${Object.entries(CATEGORY_KEYS).map(([k, v]) =>
             `<button type="button" data-cat="${v}" aria-pressed="${r.category === v}"><kbd>${k}</kbd>${CATEGORY_LABEL[v]}</button>`).join('')}
         </fieldset>
 
         <div class="decide">
           <button class="btn btn-confirm" id="act-confirm"><kbd>C</kbd>Conferma</button>
+          <button class="btn btn-ontopic" id="act-ontopic"><kbd>T</kbd>In tema</button>
           <button class="btn btn-reject" id="act-reject"><kbd>N</kbd>Non pertinente</button>
           <button class="btn btn-ghost" id="act-skip"><kbd>S</kbd>Salta</button>
         </div>
@@ -919,6 +921,7 @@ function drawReview() {
   document.querySelectorAll('[data-cat]').forEach(b => b.addEventListener('click', () => setCategory(b.dataset.cat)));
   document.getElementById('act-confirm').addEventListener('click', () => decide('confirmed'));
   document.getElementById('act-reject').addEventListener('click', () => decide('not_relevant'));
+  document.getElementById('act-ontopic').addEventListener('click', () => decide('on_topic'));
   document.getElementById('act-skip').addEventListener('click', () => move(1));
   document.getElementById('act-undo')?.addEventListener('click', undoReview);
   document.getElementById('load-player')?.addEventListener('click', e => {
@@ -957,7 +960,8 @@ async function decide(status) {
   r.done += 1;
   r.category = null;
   state.list = null; state.social = null;
-  toast(status === 'confirmed' ? `Confermata${category ? ' come ' + CATEGORY_LABEL[category].toLowerCase() : ''}` : 'Segnata come non pertinente');
+  toast(status === 'confirmed' ? `Confermata${category ? ' come ' + CATEGORY_LABEL[category].toLowerCase() : ''}`
+    : status === 'on_topic' ? 'Segnata come in tema, senza prodotto' : 'Segnata come non pertinente');
   drawReview();
 }
 
@@ -982,6 +986,7 @@ document.addEventListener('keydown', e => {
   const k = e.key.toLowerCase();
   if (k === 'c') { e.preventDefault(); decide('confirmed'); }
   else if (k === 'n') { e.preventDefault(); decide('not_relevant'); }
+  else if (k === 't') { e.preventDefault(); decide('on_topic'); }
   else if (k === 's' || k === 'arrowright') { e.preventDefault(); move(1); }
   else if (k === 'arrowleft') { e.preventDefault(); move(-1); }
   else if (k === 'z') { e.preventDefault(); undoReview(); }
