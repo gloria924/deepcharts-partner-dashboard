@@ -13,7 +13,7 @@ Progetto Cloudflare Workers collegato a questo repo (gloria924/deepcharts-partne
 Build command vuoto, deploy command `npx wrangler deploy`. Ogni push su `main` ripubblica il sito.
 
 ## Accesso
-Login con email e password di Supabase, le stesse della dashboard attuale. Possono entrare solo gli utenti presenti nella tabella `app_users` con `active = true`:
+Accesso con codice via email (Supabase Auth, nessuna password), come nella dashboard attuale. Non si possono creare account dal login: entrano solo email già registrate. Possono entrare solo gli utenti presenti nella tabella `app_users` con `active = true`:
 - `admin` e `staff`: vedono tutti i partner e le note interne, possono aggiornare l'onboarding
 - `partner` (predisposto, non ancora usato): vede solo la propria scheda e le proprie pubblicazioni confermate
 

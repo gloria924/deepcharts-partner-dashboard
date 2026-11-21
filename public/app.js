@@ -78,26 +78,48 @@ async function ensureProfile() {
   return state.profile;
 }
 
-function renderLogin(message = '') {
+function renderLogin(message = '', email = '') {
+  const codeStep = Boolean(email);
   app.innerHTML = `
     <main class="login">
-      <form class="login-card" id="login-form">
+      <form class="login-card" id="login-form" novalidate>
         <div class="brand"><span class="brand-mark" aria-hidden="true"></span>DeepCharts <span class="brand-sub">Partner</span></div>
         <h1>Accedi</h1>
-        <label>Email<input type="email" name="email" autocomplete="username" required></label>
-        <label>Password<input type="password" name="password" autocomplete="current-password" required></label>
+        ${codeStep
+          ? `<p class="hint">Abbiamo inviato un codice a <strong>${esc(email)}</strong>. Controlla anche lo spam.</p>
+             <label>Codice ricevuto via email<input type="text" name="code" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6,10}" maxlength="10" required autofocus></label>`
+          : `<label>Email<input type="email" name="email" autocomplete="username" required autofocus></label>`}
         ${message ? `<p class="form-error" role="alert">${esc(message)}</p>` : ''}
-        <button type="submit" class="btn btn-primary">Accedi</button>
-        <p class="hint">Usa le stesse credenziali della dashboard attuale.</p>
+        <button type="submit" class="btn btn-primary">${codeStep ? 'Accedi' : 'Invia il codice'}</button>
+        ${codeStep
+          ? '<button type="button" class="btn btn-ghost" id="change-email">Usa un\'altra email</button>'
+          : '<p class="hint">Riceverai un codice via email, come nella dashboard attuale.</p>'}
       </form>
     </main>`;
+  document.getElementById('change-email')?.addEventListener('click', () => renderLogin());
   document.getElementById('login-form').addEventListener('submit', async e => {
     e.preventDefault();
     const f = new FormData(e.target);
-    const btn = e.target.querySelector('button');
-    btn.disabled = true; btn.textContent = 'Accesso in corso…';
-    const { error } = await sb.auth.signInWithPassword({ email: f.get('email'), password: f.get('password') });
-    if (error) renderLogin(error.message === 'Invalid login credentials' ? 'Email o password non corretti.' : error.message);
+    const btn = e.target.querySelector('button[type=submit]');
+    btn.disabled = true;
+    if (!codeStep) {
+      const address = String(f.get('email') || '').trim().toLowerCase();
+      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(address)) { btn.disabled = false; return renderLogin('Inserisci un indirizzo email valido.'); }
+      btn.textContent = 'Invio in corso…';
+      const { error } = await sb.auth.signInWithOtp({ email: address, options: { shouldCreateUser: false } });
+      if (error) {
+        const msg = /signups? not allowed|not found|otp_disabled/i.test(error.message)
+          ? 'Questa email non è abilitata alla dashboard.'
+          : /rate|seconds/i.test(error.message) ? 'Hai richiesto troppi codici. Aspetta un minuto e riprova.' : error.message;
+        return renderLogin(msg);
+      }
+      return renderLogin('', address);
+    }
+    const token = String(f.get('code') || '').replace(/\s+/g, '');
+    if (!/^\d{6,10}$/.test(token)) { btn.disabled = false; return renderLogin('Il codice è fatto solo di cifre: ricontrolla l\'email.', email); }
+    btn.textContent = 'Verifica in corso…';
+    const { error } = await sb.auth.verifyOtp({ email, token, type: 'email' });
+    if (error) renderLogin(/expired|invalid/i.test(error.message) ? 'Codice non valido o scaduto. Richiedine uno nuovo.' : error.message, email);
   });
 }
 
