@@ -124,7 +124,7 @@ function renderLogin(message = '', email = '') {
 }
 
 const NAV = [
-  ['#/', 'Partner'], ['#/social', 'Pubblicazioni'], ['#/top', 'Top 30'],
+  ['#/', 'Partner'], ['#/review', 'Verifica'], ['#/social', 'Pubblicazioni'], ['#/top', 'Top 30'],
   ['#/new', 'Nuovi iscritti'], ['#/attention', 'Da attenzionare'],
 ];
 function currentSection() {
@@ -165,6 +165,7 @@ async function route() {
     if (profile.role === 'partner') return renderDetail(profile.partner_id, { partnerView: true });
     if (m) return renderDetail(m[1]);
     const section = currentSection();
+    if (section === '#/review') return renderReview();
     if (section === '#/social') return renderSocial();
     if (section === '#/top') return renderTop();
     if (section === '#/new') return renderNew();
@@ -804,5 +805,187 @@ async function renderSocial() {
     rows.map(x => [x.published_at.slice(0, 10), x.partners?.name, x.partners?.affiliate_code, TYPE_LABEL[x.partners?.type], PLATFORM_LABEL[x.platform],
       FORMAT_LABEL[x.format], x.title, x.url, MENTION_LABEL[x.mention] || '', REVIEW_LABEL[x.review_status]])));
 }
+
+// ---------------------------------------------------------------- Verifica pubblicazioni
+const CATEGORY_LABEL = { tutorial: 'Tutorial', dedicated: 'Dedicato', live: 'Live', giveaway: 'Giveaway' };
+const CATEGORY_KEYS = { 1: 'tutorial', 2: 'dedicated', 3: 'live', 4: 'giveaway' };
+const ytId = url => (String(url).match(/(?:v=|\/shorts\/|youtu\.be\/|\/live\/)([\w-]{11})/) || [])[1];
+const igPath = url => (String(url).match(/instagram\.com\/((?:p|reel|reels|tv)\/[\w-]+)/) || [])[1];
+
+function mediaPreview(x) {
+  if (x.platform === 'youtube' && ytId(x.url)) {
+    const id = ytId(x.url);
+    return `<div class="frames">
+      <img class="frame-main" src="https://i.ytimg.com/vi/${id}/hqdefault.jpg" alt="Miniatura del video">
+      <div class="frame-row">${[1, 2, 3].map(n =>
+        `<img src="https://i.ytimg.com/vi/${id}/hq${n}.jpg" alt="Fotogramma al ${n * 25}% del video" loading="lazy" data-hide-on-error>`).join('')}</div>
+      <p class="frame-note">Miniatura e tre fotogrammi presi da YouTube al 25%, 50% e 75% del video.</p>
+      <div id="player-slot"><button class="btn" id="load-player" data-yt="${id}">Guarda il video qui</button></div>
+    </div>`;
+  }
+  if (x.platform === 'instagram' && x.format !== 'story' && igPath(x.url)) {
+    return `<iframe class="ig-embed" src="https://www.instagram.com/${igPath(x.url)}/embed" title="Anteprima del post Instagram" loading="lazy"></iframe>`;
+  }
+  if (x.format === 'story' && x.media_drive_file_id) {
+    return `<div class="frames">
+      <img class="frame-story" src="https://drive.google.com/thumbnail?id=${encodeURIComponent(x.media_drive_file_id)}&sz=w800" alt="Storia archiviata" data-story-fallback>
+    </div>`;
+  }
+  return '<p class="frame-note">Anteprima non disponibile per questo contenuto. Usa Apri contenuto.</p>';
+}
+
+function highlightMention(text) {
+  return esc(text || '').replace(/\b(deep\s*(?:charts?|dom|gamma))\b/gi, '<mark>$1</mark>');
+}
+
+async function renderReview() {
+  if (!state.review) {
+    app.innerHTML = shell('<p class="loading">Caricamento pubblicazioni da verificare…</p>');
+    bindShell();
+    const rows = await fetchAll(() => sb.from('publications')
+      .select('id, partner_id, platform, format, category, published_at, title, url, mention, evidence, media_drive_file_id, partners(name, affiliate_code, type)')
+      .eq('review_status', 'pending').order('published_at', { ascending: false }).order('id'));
+    state.review = { all: rows, platform: 'all', index: 0, category: null, history: [], done: 0, busy: false };
+  }
+  drawReview();
+}
+
+function reviewQueue() {
+  const r = state.review;
+  return r.all.filter(x => r.platform === 'all' || x.platform === r.platform)
+    .sort((a, b) => (b.mention === 'present') - (a.mention === 'present') || b.published_at.localeCompare(a.published_at));
+}
+
+function drawReview() {
+  const r = state.review;
+  const queue = reviewQueue();
+  if (r.index >= queue.length) r.index = Math.max(0, queue.length - 1);
+  const x = queue[r.index];
+  const count = p => r.all.filter(y => p === 'all' || y.platform === p).length;
+  r.category = x ? (r.category ?? x.category ?? null) : null;
+
+  app.innerHTML = shell(`
+    <section class="list-head">
+      <div><h1>Verifica pubblicazioni</h1>
+      <p class="sub">Conferma solo se DeepCharts, DeepDOM o DeepGamma si vedono a schermo. Prima i contenuti che li citano nel testo.</p></div>
+      <div class="review-progress"><strong>${nf.format(queue.length)}</strong> da verificare${r.done ? `<span>${nf.format(r.done)} decise ora</span>` : ''}</div>
+    </section>
+    <nav class="tabs" aria-label="Social">
+      ${[['all', 'Tutti i social'], ['youtube', 'YouTube'], ['instagram', 'Instagram'], ['tiktok', 'TikTok']].map(([v, l]) =>
+        `<button data-rplatform="${v}" aria-pressed="${r.platform === v}">${l}<span class="count">${nf.format(count(v))}</span></button>`).join('')}
+    </nav>
+    ${!x ? `<section class="empty-panel"><h2>Niente da verificare</h2><p>${r.done ? 'Hai finito la coda. ' : ''}Le nuove pubblicazioni raccolte dalle automazioni arriveranno qui.</p></section>` : `
+    <section class="review">
+      <div class="review-media">${mediaPreview(x)}</div>
+      <div class="review-info">
+        <p class="review-pos">${r.index + 1} di ${nf.format(queue.length)}</p>
+        <h2 class="review-title">${esc(x.title || 'Senza titolo')}</h2>
+        <p class="sub">
+          <a href="#/p/${esc(x.partner_id)}">${esc(x.partners?.name || '–')}</a>
+          <span>${esc(PLATFORM_LABEL[x.platform])}, ${esc((FORMAT_LABEL[x.format] || '').toLowerCase())}</span>
+          <span>${esc(date(x.published_at))}</span>
+        </p>
+        <p class="mention mention-${esc(x.mention || 'none')}">${x.mention === 'present' ? 'DeepCharts citato nel testo' : x.mention === 'not_applicable' ? 'Testo non disponibile: verifica dall\'immagine' : 'Nessuna menzione nel testo'}</p>
+        ${x.evidence ? `<blockquote class="evidence">${highlightMention(x.evidence)}</blockquote>` : ''}
+        <a class="btn" href="${safeUrl(x.url)}" target="_blank" rel="noopener">Apri contenuto</a>
+
+        <fieldset class="cats">
+          <legend>Categoria <span class="muted">(facoltativa, conta per goal e onboarding)</span></legend>
+          ${Object.entries(CATEGORY_KEYS).map(([k, v]) =>
+            `<button type="button" data-cat="${v}" aria-pressed="${r.category === v}"><kbd>${k}</kbd>${CATEGORY_LABEL[v]}</button>`).join('')}
+        </fieldset>
+
+        <div class="decide">
+          <button class="btn btn-confirm" id="act-confirm"><kbd>C</kbd>Conferma</button>
+          <button class="btn btn-reject" id="act-reject"><kbd>N</kbd>Non pertinente</button>
+          <button class="btn btn-ghost" id="act-skip"><kbd>S</kbd>Salta</button>
+        </div>
+        <p class="keys">
+          ${r.history.length ? '<button class="linklike" id="act-undo"><kbd>Z</kbd> Annulla l\'ultima decisione</button>' : ''}
+          <span class="muted">Frecce sinistra e destra per scorrere.</span>
+        </p>
+      </div>
+    </section>`}
+  `);
+  bindShell();
+
+  document.querySelectorAll('[data-rplatform]').forEach(b => b.addEventListener('click', () => { r.platform = b.dataset.rplatform; r.index = 0; r.category = null; drawReview(); }));
+  if (!x) return;
+  document.querySelectorAll('img[data-hide-on-error]').forEach(img => img.addEventListener('error', () => img.remove()));
+  document.querySelectorAll('img[data-story-fallback]').forEach(img => img.addEventListener('error', () => {
+    img.replaceWith(Object.assign(document.createElement('p'), { className: 'frame-note',
+      textContent: "Anteprima non disponibile: serve essere collegati a Google con l'account che ha accesso alla cartella delle storie. Usa Apri contenuto." }));
+  }));
+  document.querySelectorAll('[data-cat]').forEach(b => b.addEventListener('click', () => setCategory(b.dataset.cat)));
+  document.getElementById('act-confirm').addEventListener('click', () => decide('confirmed'));
+  document.getElementById('act-reject').addEventListener('click', () => decide('not_relevant'));
+  document.getElementById('act-skip').addEventListener('click', () => move(1));
+  document.getElementById('act-undo')?.addEventListener('click', undoReview);
+  document.getElementById('load-player')?.addEventListener('click', e => {
+    const id = e.currentTarget.dataset.yt;
+    document.getElementById('player-slot').innerHTML =
+      `<iframe class="yt-embed" src="https://www.youtube-nocookie.com/embed/${id}" title="Video YouTube" allow="encrypted-media; picture-in-picture" allowfullscreen></iframe>`;
+  });
+}
+
+function setCategory(cat) {
+  const r = state.review;
+  r.category = r.category === cat ? null : cat;
+  document.querySelectorAll('[data-cat]').forEach(b => b.setAttribute('aria-pressed', b.dataset.cat === r.category));
+}
+function move(step) {
+  const r = state.review;
+  const n = reviewQueue().length;
+  if (!n) return;
+  r.index = (r.index + step + n) % n;
+  r.category = null;
+  drawReview();
+}
+
+async function decide(status) {
+  const r = state.review;
+  if (r.busy) return;
+  const x = reviewQueue()[r.index];
+  if (!x) return;
+  r.busy = true;
+  const category = status === 'confirmed' ? r.category : null;
+  const { error } = await sb.from('publications').update({ review_status: status, category }).eq('id', x.id);
+  r.busy = false;
+  if (error) return toast('Decisione non salvata: ' + error.message, 'err');
+  r.all = r.all.filter(y => y.id !== x.id);
+  r.history.push({ item: x });
+  r.done += 1;
+  r.category = null;
+  state.list = null; state.social = null;
+  toast(status === 'confirmed' ? `Confermata${category ? ' come ' + CATEGORY_LABEL[category].toLowerCase() : ''}` : 'Segnata come non pertinente');
+  drawReview();
+}
+
+async function undoReview() {
+  const r = state.review;
+  const last = r.history.pop();
+  if (!last) return;
+  const { error } = await sb.from('publications').update({ review_status: 'pending', category: null }).eq('id', last.item.id);
+  if (error) { r.history.push(last); return toast('Annullamento non riuscito: ' + error.message, 'err'); }
+  r.all.push({ ...last.item, category: null });
+  r.done -= 1;
+  r.index = reviewQueue().findIndex(y => y.id === last.item.id);
+  r.category = null;
+  state.list = null; state.social = null;
+  toast('Decisione annullata: la pubblicazione è di nuovo da verificare');
+  drawReview();
+}
+
+document.addEventListener('keydown', e => {
+  if (currentSection() !== '#/review' || !state.review || e.metaKey || e.ctrlKey || e.altKey) return;
+  if (e.target.closest('input, textarea, select, iframe')) return;
+  const k = e.key.toLowerCase();
+  if (k === 'c') { e.preventDefault(); decide('confirmed'); }
+  else if (k === 'n') { e.preventDefault(); decide('not_relevant'); }
+  else if (k === 's' || k === 'arrowright') { e.preventDefault(); move(1); }
+  else if (k === 'arrowleft') { e.preventDefault(); move(-1); }
+  else if (k === 'z') { e.preventDefault(); undoReview(); }
+  else if (CATEGORY_KEYS[k]) { e.preventDefault(); setCategory(CATEGORY_KEYS[k]); }
+});
 
 boot();

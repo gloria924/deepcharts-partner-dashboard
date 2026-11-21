@@ -209,6 +209,44 @@ table { border-collapse: collapse; width: 100%; }
 .reason-after30 { color: var(--ask); }
 .reason-nodate { color: var(--muted); }
 
+/* --------------------------------------------------------------- verifica */
+.review-progress { text-align: right; color: var(--muted); }
+.review-progress strong { display: block; font-size: 1.8rem; color: var(--ink); line-height: 1; }
+.review-progress span { display: block; font-size: 0.8rem; color: var(--bid); margin-top: 0.25rem; }
+.review { display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(320px, 1fr); gap: 1.25rem; align-items: start; }
+.review-media, .review-info { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-m); padding: 1rem; min-width: 0; }
+.review-info { display: grid; gap: 0.85rem; align-content: start; padding: 1.25rem; }
+.review-pos { margin: 0; font-size: 0.8rem; color: var(--muted); }
+.review-title { font-size: 1.25rem; line-height: 1.3; }
+.frames { display: grid; gap: 0.5rem; }
+.frame-main, .frame-story { width: 100%; border-radius: var(--radius-s); background: #000; display: block; }
+.frame-story { max-height: 70vh; object-fit: contain; }
+.frame-row { display: grid; grid-template-columns: repeat(3, 1fr); gap: 0.5rem; }
+.frame-row img { width: 100%; border-radius: 6px; display: block; background: #000; }
+.frame-note { margin: 0; font-size: 0.8rem; color: var(--muted); }
+.yt-embed { width: 100%; aspect-ratio: 16 / 9; border: 0; border-radius: var(--radius-s); }
+.ig-embed { width: 100%; height: 640px; border: 0; border-radius: var(--radius-s); background: #fff; }
+.mention { margin: 0; font-size: 0.875rem; font-weight: 500; }
+.mention-present { color: var(--bid); }
+.mention-not_detected, .mention-none, .mention-not_applicable { color: var(--muted); }
+.evidence { margin: 0; padding: 0.6rem 0.8rem; border-left: 3px solid var(--line-strong); background: var(--bg); font-size: 0.85rem; color: var(--muted); white-space: pre-line; max-height: 9rem; overflow: auto; }
+.evidence mark { background: var(--violet-soft); color: var(--ink); padding: 0 2px; border-radius: 3px; }
+.cats { border: 0; margin: 0; padding: 0; display: flex; gap: 0.4rem; flex-wrap: wrap; }
+.cats legend { font-size: 0.85rem; margin-bottom: 0.4rem; padding: 0; }
+.cats button { font: 500 0.85rem var(--font); color: var(--ink); background: var(--bg); border: 1px solid var(--line); border-radius: var(--radius-s); padding: 0.45rem 0.65rem; cursor: pointer; }
+.cats button[aria-pressed="true"] { border-color: var(--violet); background: var(--violet-soft); }
+kbd { font: 600 0.7rem var(--font); display: inline-block; min-width: 1.2rem; padding: 0.1rem 0.3rem; margin-right: 0.4rem; border-radius: 4px; background: rgba(255,255,255,0.08); border: 1px solid var(--line-strong); text-align: center; }
+.decide { display: grid; grid-template-columns: 1fr 1fr auto; gap: 0.5rem; }
+.decide .btn { padding: 0.85rem 0.9rem; font-size: 0.95rem; }
+.btn-confirm { background: var(--bid); color: #04130A; border-color: var(--bid); font-weight: 600; }
+.btn-confirm:hover { background: #4ADB85; border-color: #4ADB85; }
+.btn-reject { background: var(--ask-soft); color: var(--ask); border-color: transparent; font-weight: 600; }
+.btn-reject:hover { border-color: var(--ask); }
+.keys { margin: 0; display: flex; gap: 1rem; flex-wrap: wrap; font-size: 0.8rem; align-items: center; }
+.linklike { all: unset; cursor: pointer; color: var(--violet-text); }
+.linklike:focus-visible { outline: 2px solid var(--violet-text); }
+@media (max-width: 900px) { .review { grid-template-columns: 1fr; } .ig-embed { height: 520px; } }
+
 /* --------------------------------------------------------------- scheda */
 .kpis {
   display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
