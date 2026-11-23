@@ -1019,8 +1019,10 @@ function mediaPreview(x) {
     return `<iframe class="ig-embed" src="https://www.instagram.com/${igPath(x.url)}/embed" title="Anteprima del post Instagram" loading="lazy"></iframe>`;
   }
   if (x.format === 'story' && x.media_drive_file_id) {
+    // Lettore di Drive: mostra immagini e video, serve la cartella condivisa con chiunque abbia il link.
     return `<div class="frames">
-      <img class="frame-story" src="https://drive.google.com/thumbnail?id=${encodeURIComponent(x.media_drive_file_id)}&sz=w800" alt="Storia archiviata" data-story-fallback>
+      <iframe class="frame-story" src="https://drive.google.com/file/d/${encodeURIComponent(x.media_drive_file_id)}/preview" title="Storia archiviata" allow="autoplay" loading="lazy"></iframe>
+      <p class="frame-note">Se la storia non si vede, usa Apri contenuto.</p>
     </div>`;
   }
   return '<p class="frame-note">Anteprima non disponibile per questo contenuto. Usa Apri contenuto.</p>';
