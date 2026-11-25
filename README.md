@@ -16,7 +16,7 @@ Build command vuoto, deploy command `npx wrangler deploy`. Ogni push su `main` r
 Accesso con codice via email (Supabase Auth, nessuna password), come nella dashboard attuale. Non si possono creare account dal login: entrano solo email già registrate. Possono entrare solo gli utenti presenti nella tabella `app_users` con `active = true`:
 - `admin` e `staff`: vedono tutti i partner e le note interne, possono aggiornare l'onboarding
 - `partner` (predisposto, non ancora usato): vede solo la propria scheda e le proprie pubblicazioni confermate
-- `contabilita`: vede solo la sezione Payout (nome, email, tipo e commissioni degli affiliati sopra gli 800 o con una pratica)
+- `contabilita`: vede solo la sezione Payout (in inglese) (nome, email, tipo e commissioni degli affiliati sopra gli 800 o con una pratica)
 - permesso `payout_access` (colonna di `app_users`): uno staff con questo permesso vede anche la sezione Payout. Senza, le pratiche non sono leggibili nemmeno dal database.
 
 ## Payout
