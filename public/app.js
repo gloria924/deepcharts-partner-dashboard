@@ -64,7 +64,7 @@ async function boot() {
   sb.auth.onAuthStateChange((_e, session) => {
     const changed = (session?.user?.id || null) !== (state.session?.user?.id || null);
     state.session = session;
-    if (changed) { state.profile = null; state.list = null; route(); }
+    if (changed) { state.profile = null; state.list = null; state.payout = null; route(); }
   });
   window.addEventListener('hashchange', route);
   route();
@@ -72,7 +72,7 @@ async function boot() {
 
 async function ensureProfile() {
   if (state.profile) return state.profile;
-  const { data, error } = await sb.from('app_users').select('role, partner_id, active').eq('user_id', state.session.user.id).maybeSingle();
+  const { data, error } = await sb.from('app_users').select('role, partner_id, active, payout_access').eq('user_id', state.session.user.id).maybeSingle();
   if (error) throw error;
   state.profile = data && data.active ? data : { role: 'none' };
   return state.profile;
@@ -127,19 +127,27 @@ const NAV = [
   ['#/', 'Partner'], ['#/review', 'Verifica'], ['#/social', 'Pubblicazioni'], ['#/top', 'Top 30'],
   ['#/new', 'Nuovi iscritti'], ['#/attention', 'Da attenzionare'], ['#/report', 'Report'], ['#/upload', 'Carica dati'],
 ];
+const isStaffRole = p => p && (p.role === 'admin' || p.role === 'staff');
+const canPayout = p => p && (p.role === 'contabilita' || (isStaffRole(p) && p.payout_access));
+function navItems() {
+  const p = state.profile;
+  if (p?.role === 'contabilita') return [['#/payout', 'Payout']];
+  return canPayout(p) ? [...NAV, ['#/payout', 'Payout']] : NAV;
+}
 function currentSection() {
   const h = location.hash || '#/';
   if (h.startsWith('#/p/')) return '#/';
-  return NAV.some(([k]) => k === h) ? h : '#/';
+  return navItems().some(([k]) => k === h) ? h : '#/';
 }
 function shell(content, { back = false } = {}) {
-  const staff = state.profile && (state.profile.role === 'admin' || state.profile.role === 'staff');
+  const staff = isStaffRole(state.profile) || state.profile?.role === 'contabilita';
   const active = currentSection();
+  const home = state.profile?.role === 'contabilita' ? '#/payout' : '#/';
   return `
     <header class="topbar">
       <div class="topbar-left">
-        <a class="brand" href="#/"><span class="brand-mark" aria-hidden="true"></span>DeepCharts <span class="brand-sub">Partner</span></a>
-        ${staff ? `<nav class="nav" aria-label="Sezioni">${NAV.map(([href, label]) =>
+        <a class="brand" href="${home}"><span class="brand-mark" aria-hidden="true"></span>DeepCharts <span class="brand-sub">Partner</span></a>
+        ${staff ? `<nav class="nav" aria-label="Sezioni">${navItems().map(([href, label]) =>
           `<a href="${href}" ${href === active ? 'aria-current="page"' : ''}>${label}</a>`).join('')}</nav>` : ''}
       </div>
       <div class="topbar-right">
@@ -163,8 +171,10 @@ async function route() {
     }
     const m = location.hash.match(/^#\/p\/([0-9a-f-]{36})$/i);
     if (profile.role === 'partner') return renderDetail(profile.partner_id, { partnerView: true });
+    if (profile.role === 'contabilita') return renderPayout();
     if (m) return renderDetail(m[1]);
     const section = currentSection();
+    if (section === '#/payout') return renderPayout();
     if (section !== '#/report') state.report = null;
     if (section === '#/report') return renderReport();
     if (section === '#/upload') return renderUpload();
@@ -1352,10 +1362,370 @@ function previewImport(fileName, text) {
     btn.disabled = true; btn.textContent = 'Salvataggio in corso…';
     const { data, error } = await sb.rpc('import_commercial_csv', { p_as_of: asofInput.value, p_file_name: fileName, p_rows: records });
     if (error) { btn.disabled = false; btn.textContent = `Salva ${nf.format(records.length)} profili`; return toast('Caricamento non riuscito: ' + error.message, 'err'); }
-    state.list = null; state.social = null;
+    state.list = null; state.social = null; state.payout = null;
     toast(`Dati del ${date(data.data_as_of)} salvati: ${nf.format(data.metriche_scritte)} profili, ${nf.format(data.partner_nuovi)} nuovi`);
     renderUpload();
   });
+}
+
+// ---------------------------------------------------------------- Payout
+// Pratiche di payout: una riga per richiesta, con la fase, chi deve fare la prossima mossa e il giro del martedì.
+// Le regole di accesso stanno nel database (permesso payout: owner e contabilità).
+const PAYOUT_PREAVVISO = 800;
+const PAYOUT_SOGLIA = 1000;
+const STAGES = {
+  requested:    { label: 'Richiesta ricevuta',             owner: 'noi',       next: 'Inviare l\'invito Deel',                       action: ['deel_invited', 'Invito Deel inviato'] },
+  deel_invited: { label: 'Invito Deel inviato',            owner: 'affiliato', next: 'Firmare il contratto su Deel',                  action: ['deel_signed', 'Contratto firmato'] },
+  deel_signed:  { label: 'Contratto firmato',              owner: 'affiliato', next: 'Completare il profilo Deel',                    action: ['ready', 'Profilo attivo'] },
+  ready:        { label: 'Pronto per il giro',             owner: 'noi',       next: 'Creare la richiesta di pagamento su Deel',      action: ['payment_sent', 'Richiesta inviata'] },
+  payment_sent: { label: 'Richiesta di pagamento inviata', owner: 'affiliato', next: 'Approvare la richiesta nelle notifiche Deel',   action: ['to_approve', 'Approvata dall\'affiliato'] },
+  to_approve:   { label: 'Da approvare',                   owner: 'noi',       next: 'Approvazione finale della contabilità',         action: ['paid', 'Pagato'] },
+  paid:         { label: 'Pagato',                         owner: null,        next: '' },
+  paused:       { label: 'In pausa',                       owner: 'affiliato', next: 'Riprende quando completa il passaggio' },
+  cancelled:    { label: 'Annullata',                      owner: null,        next: '' },
+};
+const STAGE_ORDER = ['requested', 'deel_invited', 'deel_signed', 'ready', 'payment_sent', 'to_approve', 'paid', 'paused', 'cancelled'];
+const OPEN = s => s !== 'paid' && s !== 'cancelled';
+const IN_QUEUE = s => s === 'ready' || s === 'payment_sent' || s === 'to_approve';
+const DEEL_LABEL = { none: 'Non ancora su Deel', invited: 'Invitato', signed: 'Contratto firmato', active: 'Attivo', paused: 'In pausa', terminated: 'Contratto chiuso' };
+
+const romeToday = () => new Date().toLocaleDateString('en-CA', { timeZone: 'Europe/Rome' });
+const addDays = (iso, n) => new Date(Date.parse(iso + 'T00:00:00Z') + n * DAY).toISOString().slice(0, 10);
+const isoDow = iso => ((new Date(iso + 'T00:00:00Z').getUTCDay() + 6) % 7) + 1;
+const upcomingTuesday = () => { const d = romeToday(); return addDays(d, (2 - isoDow(d) + 7) % 7); };
+const daysInStage = r => Math.max(0, Math.floor((Date.now() - Date.parse(r.stage_since)) / DAY));
+const sumByCurrency = rows => rows.reduce((t, r) => { const c = r.currency || r.person?.currency || '?'; t[c] = (t[c] || 0) + Number(r.amount || 0); return t; }, {});
+const totalsText = t => Object.entries(t).map(([c, v]) => money(v, c)).join(' + ') || '–';
+
+function waitBadge(r) {
+  const d = daysInStage(r);
+  const st = STAGES[r.stage];
+  if (!OPEN(r.stage)) return '';
+  let cls = '';
+  if (st.owner === 'affiliato' && r.stage !== 'paused') cls = d >= 21 ? 'wait-crit' : d >= 9 ? 'wait-high' : d >= 5 ? 'wait-mid' : '';
+  if (st.owner === 'noi') cls = d >= 2 ? 'wait-high' : '';
+  const hint = st.owner === 'affiliato' && r.stage !== 'paused' && d >= 21 ? ' · da mettere in pausa' : st.owner === 'affiliato' && r.stage !== 'paused' && d >= 14 ? ' · avvisare il manager' : '';
+  return `<span class="wait ${cls}">${d === 0 ? 'oggi' : d === 1 ? '1 giorno' : d + ' giorni'}${hint}</span>`;
+}
+const ownerTag = st => st.owner === 'noi' ? '<span class="owner owner-noi">Tocca a noi</span>'
+  : st.owner === 'affiliato' ? '<span class="owner owner-aff">Tocca all\'affiliato</span>' : '';
+const personCell = p => `<span class="pname">${esc(p?.name || 'Affiliato')}</span><span class="pmeta">${esc(p?.email || '')}</span>`;
+
+async function loadPayout() {
+  const [payouts, people] = await Promise.all([
+    fetchAll(() => sb.from('payouts').select('*').order('created_at')),
+    sb.rpc('payout_people'),
+  ]);
+  if (people.error) throw people.error;
+  const byId = new Map(people.data.map(p => [p.partner_id, p]));
+  for (const r of payouts) r.person = byId.get(r.partner_id);
+  const asOf = people.data.reduce((m, p) => (p.as_of && p.as_of > m ? p.as_of : m), '');
+  state.payout = { payouts, people: people.data, byId, asOf };
+}
+
+async function renderPayout() {
+  state.payoutView ||= { tab: 'noi', q: '' };
+  const v = state.payoutView;
+  if (!state.payout) {
+    app.innerHTML = shell('<p class="loading">Caricamento payout…</p>');
+    bindShell();
+    await loadPayout();
+  }
+  const { payouts, people, asOf } = state.payout;
+  const tuesday = upcomingTuesday();
+  const open = payouts.filter(r => OPEN(r.stage));
+  const openIds = new Set(open.map(r => r.partner_id));
+  const noi = open.filter(r => STAGES[r.stage].owner === 'noi');
+  const aff = open.filter(r => STAGES[r.stage].owner === 'affiliato');
+  const batch = open.filter(r => IN_QUEUE(r.stage) && r.batch_date && r.batch_date <= tuesday);
+  const stuck = aff.filter(r => r.stage !== 'paused' && daysInStage(r) >= 9);
+  const eligible = people.filter(p => !openIds.has(p.partner_id) && Number(p.pending) >= PAYOUT_SOGLIA);
+  const near = people.filter(p => !openIds.has(p.partner_id) && Number(p.pending) >= PAYOUT_PREAVVISO && Number(p.pending) < PAYOUT_SOGLIA);
+
+  const TABS = [
+    ['noi', `Tocca a noi (${noi.length})`], ['affiliato', `Tocca all'affiliato (${aff.length})`],
+    ['giro', `Giro del ${date(tuesday)} (${batch.length})`], ['soglie', `Soglie (${eligible.length + near.length})`],
+    ['pagati', 'Pagati'], ['tutte', 'Tutte'],
+  ];
+  app.innerHTML = shell(`
+    <section class="list-head">
+      <div>
+        <h1>Payout</h1>
+        <p class="sub">Giro di pagamento ogni martedì: chi è pronto entro venerdì viene pagato il martedì dopo. Commissioni da pagare dal CSV del ${esc(date(asOf))}.</p>
+      </div>
+      <div class="actions">
+        <button class="btn" id="export">Esporta CSV</button>
+        <button class="btn btn-primary" id="new-payout">Registra richiesta</button>
+      </div>
+    </section>
+    <section class="kpis kpis-compact">
+      <div class="kpi"><span class="kpi-label">Tocca a noi</span><span class="kpi-value">${nf.format(noi.length)}</span></div>
+      <div class="kpi"><span class="kpi-label">Tocca all'affiliato</span><span class="kpi-value">${nf.format(aff.length)}</span></div>
+      <div class="kpi"><span class="kpi-label">Ferme da 9 giorni o più</span><span class="kpi-value ${stuck.length ? 'warn' : ''}">${nf.format(stuck.length)}</span></div>
+      <div class="kpi"><span class="kpi-label">Giro del ${esc(date(tuesday))}</span><span class="kpi-value">${nf.format(batch.length)}</span></div>
+      <div class="kpi"><span class="kpi-label">Importo del giro</span><span class="kpi-value kpi-small">${esc(totalsText(sumByCurrency(batch)))}</span></div>
+      <div class="kpi"><span class="kpi-label">Idonei senza richiesta</span><span class="kpi-value">${nf.format(eligible.length)}</span></div>
+    </section>
+    <section class="filters">
+      <div class="seg" role="group" aria-label="Vista">
+        ${TABS.map(([k, l]) => `<button data-ptab="${k}" aria-pressed="${v.tab === k}">${esc(l)}</button>`).join('')}
+      </div>
+      <input type="search" id="pq" placeholder="Cerca per nome o email" value="${esc(v.q)}" aria-label="Cerca">
+    </section>
+    <div id="payout-body"></div>
+    <dialog id="pdialog" class="pdialog" aria-labelledby="pdialog-title"></dialog>
+  `);
+  bindShell();
+  drawPayoutBody({ noi, aff, batch, eligible, near, tuesday });
+  document.querySelectorAll('[data-ptab]').forEach(b => b.addEventListener('click', () => { v.tab = b.dataset.ptab; renderPayout(); }));
+  document.getElementById('pq').addEventListener('input', e => { v.q = e.target.value; drawPayoutBody({ noi, aff, batch, eligible, near, tuesday }); });
+  document.getElementById('new-payout').addEventListener('click', () => openNewPayout());
+  document.getElementById('export').addEventListener('click', () => exportPayout({ noi, aff, batch, tuesday }));
+}
+
+function payoutRowsFor(tab, groups) {
+  const { payouts } = state.payout;
+  if (tab === 'noi') return groups.noi.sort((a, b) => STAGE_ORDER.indexOf(b.stage) - STAGE_ORDER.indexOf(a.stage) || Date.parse(a.stage_since) - Date.parse(b.stage_since));
+  if (tab === 'affiliato') return groups.aff.sort((a, b) => (a.stage === 'paused') - (b.stage === 'paused') || Date.parse(a.stage_since) - Date.parse(b.stage_since));
+  if (tab === 'giro') return groups.batch.sort((a, b) => Date.parse(a.ready_at) - Date.parse(b.ready_at));
+  if (tab === 'pagati') return payouts.filter(r => r.stage === 'paid').sort((a, b) => Date.parse(b.paid_at) - Date.parse(a.paid_at));
+  return [...payouts].sort((a, b) => Date.parse(b.created_at) - Date.parse(a.created_at));
+}
+
+function drawPayoutBody(groups) {
+  const v = state.payoutView;
+  const el = document.getElementById('payout-body');
+  const q = v.q.trim().toLowerCase();
+  const match = p => !q || [p?.name, p?.email].some(x => (x || '').toLowerCase().includes(q));
+
+  if (v.tab === 'soglie') {
+    const elig = groups.eligible.filter(match).sort((a, b) => Number(b.pending) - Number(a.pending));
+    const near = groups.near.filter(match).sort((a, b) => Number(b.pending) - Number(a.pending));
+    el.innerHTML = `
+      <section class="report-block">
+        <div class="panel-head"><h2>Sopra ${nf.format(PAYOUT_SOGLIA)} di commissioni da pagare, nessuna richiesta aperta</h2></div>
+        <p class="muted panel-note">Possono chiedere il payout. Quando arriva la richiesta, registrala con il pulsante: l'importo parte dalle commissioni da pagare.</p>
+        <div class="table-wrap"><table class="grid" id="elig-table"></table></div>
+      </section>
+      <section class="report-block">
+        <div class="panel-head"><h2>Vicini alla soglia (${nf.format(PAYOUT_PREAVVISO)}–${nf.format(PAYOUT_SOGLIA - 1)})</h2></div>
+        <p class="muted panel-note">Da preavvisare: cosa succede a ${nf.format(PAYOUT_SOGLIA)} e quali dati preparare. Nessun costo Deel finché non firmano.</p>
+        <div class="table-wrap"><table class="grid" id="near-table"></table></div>
+      </section>`;
+    const cols = withButton => [
+      { label: 'Affiliato', cell: personCell },
+      { label: 'Tipo', cell: typeCell },
+      { label: 'Commissioni da pagare', num: true, cell: p => money(p.pending, p.currency) },
+      { label: 'Commissioni totali', num: true, cell: p => money(p.commissions, p.currency) },
+      { label: 'Deel', cell: p => esc(DEEL_LABEL[p.deel_status] || p.deel_status) },
+      ...(withButton ? [{ label: '', cell: p => `<button class="btn btn-small" data-register="${esc(p.partner_id)}">Registra richiesta</button>` }] : []),
+    ];
+    simpleTable(document.getElementById('elig-table'), cols(true), elig, 'Nessuno sopra la soglia senza una pratica aperta.');
+    simpleTable(document.getElementById('near-table'), cols(true), near, 'Nessuno vicino alla soglia.');
+    el.querySelectorAll('[data-register]').forEach(b => b.addEventListener('click', () => openNewPayout(b.dataset.register)));
+    return;
+  }
+
+  const rows = payoutRowsFor(v.tab, groups).filter(r => match(r.person));
+  const note = {
+    noi: 'Pratiche in attesa di una mossa nostra: inviti Deel da mandare, richieste di pagamento da creare, approvazioni del martedì.',
+    affiliato: 'Pratiche ferme sull\'affiliato, le più vecchie in alto. Dal giorno 14 avvisare il manager, dal giorno 21 mettere in pausa.',
+    giro: `Pronti entro venerdì, in ordine di arrivo. Totale: ${totalsText(sumByCurrency(rows))}.`,
+    pagati: 'Payout completati.',
+    tutte: 'Tutte le pratiche, comprese quelle annullate.',
+  }[v.tab];
+  el.innerHTML = `<p class="muted panel-note">${esc(note)}</p><div class="table-wrap"><table class="grid rows-link" id="payout-table"></table></div>`;
+  const table = document.getElementById('payout-table');
+  const columns = [
+    { label: 'Affiliato', cell: r => personCell(r.person) },
+    { label: 'Tipo', cell: r => r.person ? typeCell(r.person) : '' },
+    { label: 'Importo', num: true, cell: r => r.amount ? money(r.amount, r.currency) : '<span class="muted">Da definire</span>' },
+    { label: 'Fase', cell: r => `<span class="stage stage-${r.stage}">${esc(STAGES[r.stage].label)}</span>${ownerTag(STAGES[r.stage])}` },
+    { label: 'Da', cell: r => waitBadge(r), cls: 'nowrap' },
+    { label: 'Prossima mossa', cell: r => esc(STAGES[r.stage].next) },
+    { label: v.tab === 'pagati' ? 'Pagato il' : 'Giro', cell: r => esc(date(v.tab === 'pagati' ? r.paid_at : r.batch_date)), cls: 'nowrap' },
+    { label: '', cell: r => {
+      const st = STAGES[r.stage];
+      if (r.stage === 'paused') return `<button class="btn btn-small" data-move="${esc(r.id)}" data-to="${esc(r.previous_stage || 'requested')}">Riprendi</button>`;
+      return st.action ? `<button class="btn btn-small btn-step" data-move="${esc(r.id)}" data-to="${st.action[0]}">${esc(st.action[1])}</button>` : '';
+    } },
+  ];
+  table.innerHTML = `<thead><tr>${columns.map(c => `<th scope="col" class="${c.num ? 'num' : ''}">${c.label}</th>`).join('')}</tr></thead>
+    <tbody>${rows.length ? rows.map(r => `<tr data-pid="${esc(r.id)}" tabindex="0">${columns.map(c => `<td class="${c.num ? 'num' : ''} ${c.cls || ''}">${c.cell(r)}</td>`).join('')}</tr>`).join('')
+      : `<tr><td colspan="${columns.length}" class="empty-row">Nessuna pratica qui.</td></tr>`}</tbody>`;
+  table.querySelectorAll('[data-move]').forEach(b => b.addEventListener('click', e => { e.stopPropagation(); movePayout(b.dataset.move, b.dataset.to); }));
+  table.querySelectorAll('tr[data-pid]').forEach(tr => {
+    tr.addEventListener('click', () => openPayoutDetail(tr.dataset.pid));
+    tr.addEventListener('keydown', e => { if (e.key === 'Enter') openPayoutDetail(tr.dataset.pid); });
+  });
+}
+
+async function movePayout(id, to, extra = {}) {
+  const r = state.payout.payouts.find(x => x.id === id);
+  const { error } = await sb.from('payouts').update({ stage: to, ...extra }).eq('id', id);
+  if (error) return toast('Non salvato: ' + error.message, 'err');
+  toast(`${r?.person?.name || 'Pratica'}: ${STAGES[to].label}`);
+  state.payout = null;
+  document.getElementById('pdialog')?.close();
+  renderPayout();
+}
+
+function openNewPayout(partnerId = null) {
+  const dlg = document.getElementById('pdialog');
+  const { people, payouts } = state.payout;
+  const openIds = new Set(payouts.filter(r => OPEN(r.stage)).map(r => r.partner_id));
+  const options = people.filter(p => !openIds.has(p.partner_id)).sort((a, b) => a.name.localeCompare(b.name, 'it'));
+  dlg.innerHTML = `
+    <form method="dialog" class="pform" id="new-form">
+      <h2 id="pdialog-title">Registra richiesta di payout</h2>
+      <label>Affiliato
+        <select name="partner" required>
+          <option value="">Scegli…</option>
+          ${options.map(p => `<option value="${esc(p.partner_id)}" ${p.partner_id === partnerId ? 'selected' : ''}>${esc(p.name)} · ${esc(p.email)} · ${money(p.pending, p.currency)}</option>`).join('')}
+        </select>
+      </label>
+      <p class="muted hint">Nell'elenco ci sono solo i profili sopra gli ${nf.format(PAYOUT_PREAVVISO)} $ di commissioni da pagare nell'ultimo CSV, o con una pratica già registrata.</p>
+      <div class="two-fields">
+        <label>Importo richiesto<input type="number" name="amount" min="1" step="0.01"></label>
+        <label>Valuta<select name="currency"><option value="USD">USD</option><option value="EUR">EUR</option></select></label>
+      </div>
+      <label>Data della richiesta<input type="date" name="requested_at" value="${romeToday()}" max="${romeToday()}"></label>
+      <label>Nota (facoltativa)<textarea name="notes" rows="2"></textarea></label>
+      <p class="muted hint" id="deel-hint"></p>
+      <div class="actions">
+        <button type="button" class="btn btn-ghost" id="cancel-new">Annulla</button>
+        <button type="submit" class="btn btn-primary">Registra</button>
+      </div>
+    </form>`;
+  const form = dlg.querySelector('form');
+  const sync = () => {
+    const p = state.payout.byId.get(form.partner.value);
+    if (!p) return (document.getElementById('deel-hint').textContent = '');
+    form.amount.value = p.pending ?? '';
+    form.currency.value = p.currency === 'EUR' ? 'EUR' : 'USD';
+    document.getElementById('deel-hint').textContent = p.deel_status === 'active'
+      ? 'È già attivo su Deel: la pratica parte da "Pronto per il giro".'
+      : 'Primo payout: la pratica parte da "Richiesta ricevuta", poi invito Deel.';
+  };
+  form.partner.addEventListener('change', sync); sync();
+  document.getElementById('cancel-new').addEventListener('click', () => dlg.close());
+  form.addEventListener('submit', async e => {
+    e.preventDefault();
+    if (!form.partner.value) return toast('Scegli l\'affiliato', 'err');
+    const btn = form.querySelector('[type=submit]'); btn.disabled = true;
+    const { error } = await sb.from('payouts').insert({
+      partner_id: form.partner.value,
+      amount: form.amount.value ? Number(form.amount.value) : null,
+      currency: form.currency.value,
+      requested_at: form.requested_at.value || romeToday(),
+      notes: form.notes.value.trim() || null,
+    });
+    btn.disabled = false;
+    if (error) return toast(/one_open/.test(error.message) ? 'Questo affiliato ha già una pratica aperta.' : 'Non salvato: ' + error.message, 'err');
+    toast('Richiesta registrata');
+    dlg.close();
+    state.payout = null;
+    state.payoutView.tab = 'noi';
+    renderPayout();
+  });
+  dlg.showModal();
+}
+
+async function openPayoutDetail(id) {
+  const r = state.payout.payouts.find(x => x.id === id);
+  if (!r) return;
+  const dlg = document.getElementById('pdialog');
+  const p = r.person || {};
+  const st = STAGES[r.stage];
+  dlg.innerHTML = `<div class="pform"><h2 id="pdialog-title">${esc(p.name || 'Affiliato')}</h2><p class="loading">Caricamento…</p></div>`;
+  dlg.showModal();
+  const { data: events, error } = await sb.from('payout_events').select('*').eq('payout_id', id).order('at', { ascending: false });
+  if (error) { toast(error.message, 'err'); return dlg.close(); }
+  const evText = e => e.kind === 'created' ? `Pratica registrata · ${STAGES[e.to_stage]?.label}`
+    : e.kind === 'stage' ? `${STAGES[e.from_stage]?.label} → ${STAGES[e.to_stage]?.label}`
+    : e.kind === 'email' ? `Email: ${e.note}` : `Nota: ${e.note}`;
+  const when = ts => new Date(ts).toLocaleString('it-IT', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' });
+  dlg.innerHTML = `
+    <form class="pform" id="detail-form">
+      <div class="pform-head">
+        <div>
+          <h2 id="pdialog-title">${esc(p.name || 'Affiliato')}</h2>
+          <p class="muted">${esc(p.email || '')} · ${esc(TYPE_LABEL[p.type] || p.type || '')}</p>
+        </div>
+        <button type="button" class="btn btn-ghost" id="close-detail" aria-label="Chiudi">✕</button>
+      </div>
+      <dl class="notes">
+        <dt>Fase</dt><dd><span class="stage stage-${r.stage}">${esc(st.label)}</span> ${ownerTag(st)} ${waitBadge(r)}</dd>
+        <dt>Prossima mossa</dt><dd>${esc(st.next || '–')}</dd>
+        <dt>Deel</dt><dd>${esc(DEEL_LABEL[p.deel_status] || '–')}</dd>
+        <dt>Richiesta del</dt><dd>${esc(date(r.requested_at))}</dd>
+        <dt>Pronto dal</dt><dd>${esc(date(r.ready_at))}</dd>
+        <dt>Commissioni da pagare</dt><dd>${money(p.pending, p.currency)} <span class="muted">(CSV del ${esc(date(p.as_of))}; totali ${money(p.commissions, p.currency)})</span></dd>
+        ${p.manager_email ? `<dt>Manager</dt><dd>${esc(p.manager_email)}</dd>` : ''}
+      </dl>
+      <div class="two-fields">
+        <label>Importo<input type="number" name="amount" min="1" step="0.01" value="${esc(r.amount ?? '')}"></label>
+        <label>Valuta<select name="currency"><option value="USD" ${r.currency !== 'EUR' ? 'selected' : ''}>USD</option><option value="EUR" ${r.currency === 'EUR' ? 'selected' : ''}>EUR</option></select></label>
+        <label>Giro<input type="date" name="batch_date" value="${esc(r.batch_date || '')}"></label>
+      </div>
+      <label>Fase
+        <select name="stage">${STAGE_ORDER.map(s => `<option value="${s}" ${s === r.stage ? 'selected' : ''}>${esc(STAGES[s].label)}</option>`).join('')}</select>
+      </label>
+      <label>Nota<textarea name="notes" rows="2" placeholder="Es. sollecitato su WhatsApp, chiede di essere pagato in EUR…">${esc(r.notes || '')}</textarea></label>
+      <div class="actions">
+        ${OPEN(r.stage) && r.stage !== 'paused' ? '<button type="button" class="btn btn-ghost" id="pause">Metti in pausa</button>' : ''}
+        ${OPEN(r.stage) ? '<button type="button" class="btn btn-ghost" id="cancel-payout">Annulla pratica</button>' : ''}
+        <span class="spacer"></span>
+        <button type="submit" class="btn btn-primary">Salva</button>
+      </div>
+      <h3>Storico</h3>
+      <ol class="history">${events.map(e => `<li><span class="muted">${esc(when(e.at))}</span> ${esc(evText(e))}</li>`).join('') || '<li class="muted">Nessun evento</li>'}</ol>
+    </form>`;
+  const form = dlg.querySelector('form');
+  document.getElementById('close-detail').addEventListener('click', () => dlg.close());
+  document.getElementById('pause')?.addEventListener('click', () => movePayout(id, 'paused'));
+  document.getElementById('cancel-payout')?.addEventListener('click', () => {
+    if (confirmInline(form, 'Annullare la pratica? Resta nello storico, ma esce dalle liste.')) movePayout(id, 'cancelled');
+  });
+  form.addEventListener('submit', async e => {
+    e.preventDefault();
+    const patch = {
+      amount: form.amount.value ? Number(form.amount.value) : null,
+      currency: form.currency.value,
+      batch_date: form.batch_date.value || null,
+      notes: form.notes.value.trim() || null,
+    };
+    if (form.stage.value !== r.stage) patch.stage = form.stage.value;
+    const { error: err } = await sb.from('payouts').update(patch).eq('id', id);
+    if (err) return toast('Non salvato: ' + err.message, 'err');
+    toast('Salvato');
+    dlg.close();
+    state.payout = null;
+    renderPayout();
+  });
+}
+
+// Conferma in due clic senza finestre del browser: il primo clic arma il pulsante, il secondo conferma.
+function confirmInline(form, msg) {
+  const btn = form.querySelector('#cancel-payout');
+  if (btn.dataset.armed) return true;
+  btn.dataset.armed = '1';
+  btn.textContent = 'Conferma annullamento';
+  btn.classList.add('btn-reject');
+  toast(msg);
+  return false;
+}
+
+function exportPayout({ noi, aff, batch, tuesday }) {
+  const v = state.payoutView;
+  const { payouts, asOf } = state.payout;
+  const rows = v.tab === 'giro' ? batch : v.tab === 'noi' ? noi : v.tab === 'affiliato' ? aff
+    : v.tab === 'pagati' ? payouts.filter(r => r.stage === 'paid') : payouts;
+  const name = v.tab === 'giro' ? `payout-giro-${tuesday}.csv` : `payout-${v.tab}-${romeToday()}.csv`;
+  downloadCsv(name,
+    ['Nome', 'Email', 'Tipo', 'Valuta', 'Importo', 'Fase', 'Prossima mossa', 'Giorni in fase', 'Richiesta del', 'Pronto dal', 'Giro', 'Pagato il', 'Commissioni da pagare (CSV)', 'Data CSV', 'Note'],
+    rows.map(r => [r.person?.name, r.person?.email, TYPE_LABEL[r.person?.type] || '', r.currency, r.amount, STAGES[r.stage].label, STAGES[r.stage].next,
+      daysInStage(r), r.requested_at, r.ready_at?.slice(0, 10) || '', r.batch_date || '', r.paid_at?.slice(0, 10) || '', r.person?.pending ?? '', asOf, r.notes || '']));
 }
 
 boot();
