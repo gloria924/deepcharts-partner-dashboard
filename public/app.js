@@ -1063,12 +1063,15 @@ const BIO_LABEL = {
 };
 function bioLine(b) {
   if (!b) return '';
-  const [cls, label] = BIO_LABEL[b.status] || ['muted', b.status];
+  let [cls, label] = BIO_LABEL[b.status] || ['muted', b.status];
+  // Controllo manuale o link mantenuto dal controllo precedente: la nota dice più dell'etichetta standard
+  const nota = /a mano|controllo precedente/i.test(b.excerpt || '') ? b.excerpt : '';
+  if (nota && b.status === 'link') label = 'Link DeepCharts in bio';
   const removed = ['link', 'link_with_code'].includes(b.previous_status) && !['link', 'link_with_code'].includes(b.status);
   const links = (b.links || []).map(l => { const u = safeUrl(/^https?:/i.test(l) ? l : 'https://' + l);
     return u ? `<a href="${u}" target="_blank" rel="noopener">${esc(l)}</a>` : esc(l); }).join(', ');
   return `<div class="bio-line"><span class="bio-${cls}">${label}</span>${removed ? ' <strong class="bio-bad">· link tolto dopo l\'ultimo controllo</strong>' : ''}
-    <span class="pmeta">controllo del ${esc(date(b.checked_at))}${links ? ' · ' + links : ''}</span></div>`;
+    <span class="pmeta">controllo del ${esc(date(b.checked_at))}${nota ? ' · ' + esc(nota) : ''}${links ? ' · ' + links : ''}</span></div>`;
 }
 
 function highlightMention(text) {
