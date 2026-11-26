@@ -209,7 +209,7 @@ async function loadList() {
   const bio = new Map();
   for (const b of bios) {
     const e = bio.get(b.partner_id) || { checked: false, link: false };
-    e.checked = true;
+    if (b.status !== 'unreadable' && b.status !== 'not_found') e.checked = true;
     if (b.status === 'link' || b.status === 'link_with_code') e.link = true;
     bio.set(b.partner_id, e);
   }
@@ -1058,6 +1058,7 @@ const BIO_LABEL = {
   link: ['warn', 'Link DeepCharts in bio, ma senza il suo codice'],
   mention: ['warn', 'DeepCharts citato in bio, senza link'],
   none: ['bad', 'Nessun link DeepCharts in bio'],
+  unreadable: ['warn', 'Pagina dei link non leggibile in automatico: da controllare a mano'],
   not_found: ['muted', 'Canale non trovato al controllo'],
 };
 function bioLine(b) {
