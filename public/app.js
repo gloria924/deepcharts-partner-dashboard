@@ -200,10 +200,20 @@ const statusText = s => ({ done: 'completato', auto: 'rilevato in automatico', t
 
 // ---------------------------------------------------------------- lista partner
 async function loadList() {
-  const [rows, steps] = await Promise.all([
+  const [rows, steps, bios] = await Promise.all([
     fetchAll(() => sb.from('partner_overview').select('*').order('id')),
     fetchAll(() => sb.from('partner_onboarding_status').select('partner_id, position, label, status').order('partner_id').order('position')),
+    fetchAll(() => sb.from('partner_bio_latest').select('partner_id, channel_id, status').order('channel_id')),
   ]);
+  // Link in bio: per partner, se almeno un canale controllato ha il link DeepCharts
+  const bio = new Map();
+  for (const b of bios) {
+    const e = bio.get(b.partner_id) || { checked: false, link: false };
+    e.checked = true;
+    if (b.status === 'link' || b.status === 'link_with_code') e.link = true;
+    bio.set(b.partner_id, e);
+  }
+  for (const r of rows) r.bio = bio.get(r.id) || null;
   const ladders = new Map();
   for (const s of steps) {
     if (!ladders.has(s.partner_id)) ladders.set(s.partner_id, []);
@@ -223,7 +233,8 @@ function filteredRows() {
     (f.onboarding === 'all' ||
       (f.onboarding === 'complete' && r.onboarding_total > 0 && r.onboarding_done >= r.onboarding_total) ||
       (f.onboarding === 'open' && r.onboarding_done < r.onboarding_total) ||
-      (f.onboarding === 'review' && r.pending_review > 0)));
+      (f.onboarding === 'review' && r.pending_review > 0) ||
+      (f.onboarding === 'nobio' && r.bio?.checked && !r.bio.link)));
   const key = f.sort, dir = f.dir === 'asc' ? 1 : -1;
   out.sort((a, b) => {
     const va = a[key], vb = b[key];
@@ -262,6 +273,7 @@ async function renderList() {
         <option value="open" ${f.onboarding === 'open' ? 'selected' : ''}>Onboarding in corso</option>
         <option value="complete" ${f.onboarding === 'complete' ? 'selected' : ''}>Onboarding completo</option>
         <option value="review" ${f.onboarding === 'review' ? 'selected' : ''}>Con pubblicazioni da verificare</option>
+        <option value="nobio" ${f.onboarding === 'nobio' ? 'selected' : ''}>Senza link DeepCharts in bio</option>
       </select>
     </section>
     <section id="summary" class="summary"></section>
@@ -347,7 +359,7 @@ async function renderDetail(id, { partnerView = false } = {}) {
   bindShell();
   const isStaff = state.profile.role === 'admin' || state.profile.role === 'staff';
 
-  const [p, internal, metrics, steps, goals, targets, settings, pubs, channels] = await Promise.all([
+  const [p, internal, metrics, steps, goals, targets, settings, pubs, channels, bios] = await Promise.all([
     sb.from('partners').select('*').eq('id', id).maybeSingle(),
     isStaff ? sb.from('partner_internal').select('*').eq('partner_id', id).maybeSingle() : Promise.resolve({ data: null }),
     sb.from('commercial_metrics').select('*').eq('partner_id', id).order('as_of'),
@@ -357,6 +369,7 @@ async function renderDetail(id, { partnerView = false } = {}) {
     sb.from('program_settings').select('*'),
     fetchAll(() => sb.from('publications').select('*').eq('partner_id', id).order('published_at', { ascending: false })),
     sb.from('social_channels').select('*').eq('partner_id', id).order('platform'),
+    sb.from('partner_bio_latest').select('*').eq('partner_id', id),
   ].map(async q => { const r = await q; if (r && r.error) throw r.error; return Array.isArray(r) ? r : r.data; }));
 
   if (!p) {
@@ -496,7 +509,8 @@ async function renderDetail(id, { partnerView = false } = {}) {
         ${channels.length ? `<ul class="channels">${channels.map(c => `<li>
           <span class="tag">${esc(PLATFORM_LABEL[c.platform])}</span>
           <a href="${safeUrl(c.url)}" target="_blank" rel="noopener">${esc(c.handle ? '@' + c.handle : c.url)}</a>
-          <span class="${c.monitored ? 'ok' : 'muted'}">${c.monitored ? 'Monitorato' : 'Non monitorato'}</span></li>`).join('')}</ul>`
+          <span class="${c.monitored ? 'ok' : 'muted'}">${c.monitored ? 'Monitorato' : 'Non monitorato'}</span>
+          ${bioLine((bios || []).find(b => b.channel_id === c.id))}</li>`).join('')}</ul>`
           : '<p class="muted">Nessun canale monitorato. Aggiungilo nei fogli Canali YouTube o Canali Instagram dello Sheet.</p>'}
         ${[['Instagram', p.instagram_url], ['YouTube', p.youtube_url], ['TikTok', p.tiktok_url], ['X', p.x_url]].filter(([, u]) => u).length
           ? `<p class="panel-note">Profili indicati nel file commerciale: ${[['Instagram', p.instagram_url], ['YouTube', p.youtube_url], ['TikTok', p.tiktok_url], ['X', p.x_url]].filter(([, u]) => u)
@@ -1036,6 +1050,24 @@ function mediaPreview(x) {
     </div>`;
   }
   return '<p class="frame-note">Anteprima non disponibile per questo contenuto. Usa Apri contenuto.</p>';
+}
+
+// Esito dell'ultimo controllo della bio/descrizione del canale
+const BIO_LABEL = {
+  link_with_code: ['ok', 'Link DeepCharts in bio, con il suo codice'],
+  link: ['warn', 'Link DeepCharts in bio, ma senza il suo codice'],
+  mention: ['warn', 'DeepCharts citato in bio, senza link'],
+  none: ['bad', 'Nessun link DeepCharts in bio'],
+  not_found: ['muted', 'Canale non trovato al controllo'],
+};
+function bioLine(b) {
+  if (!b) return '';
+  const [cls, label] = BIO_LABEL[b.status] || ['muted', b.status];
+  const removed = ['link', 'link_with_code'].includes(b.previous_status) && !['link', 'link_with_code'].includes(b.status);
+  const links = (b.links || []).map(l => { const u = safeUrl(/^https?:/i.test(l) ? l : 'https://' + l);
+    return u ? `<a href="${u}" target="_blank" rel="noopener">${esc(l)}</a>` : esc(l); }).join(', ');
+  return `<div class="bio-line"><span class="bio-${cls}">${label}</span>${removed ? ' <strong class="bio-bad">· link tolto dopo l\'ultimo controllo</strong>' : ''}
+    <span class="pmeta">controllo del ${esc(date(b.checked_at))}${links ? ' · ' + links : ''}</span></div>`;
 }
 
 function highlightMention(text) {

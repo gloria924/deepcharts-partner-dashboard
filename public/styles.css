@@ -414,3 +414,11 @@ details p { color: var(--muted); }
 #payout-body { display: grid; gap: 0.75rem; }
 #payout-body .report-block { display: grid; gap: 0.75rem; margin-bottom: 1.25rem; }
 #payout-body .panel-head h2 { margin: 0; font-size: 1.1rem; }
+
+/* link in bio */
+.channels .bio-line span:last-child { margin-left: 0; }
+.channels .bio-line { flex-basis: 100%; font-size: 0.85rem; display: flex; flex-wrap: wrap; gap: 0.25rem 0.5rem; align-items: baseline; }
+.bio-ok { color: var(--bid); }
+.bio-warn { color: #F2B84B; }
+.bio-bad { color: var(--ask); }
+.bio-muted { color: var(--muted); }
