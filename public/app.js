@@ -220,12 +220,13 @@ async function loadList() {
     ladders.get(s.partner_id).push(s);
   }
   const asOf = rows.reduce((m, r) => (r.metrics_as_of && r.metrics_as_of > m ? r.metrics_as_of : m), '');
-  state.list = { rows, ladders, asOf };
+  // Profili esclusi dalla tracciabilità: fuori da lista, classifiche e report, visibili solo con il filtro apposito
+  state.list = { rows: rows.filter(r => !r.excluded), excludedRows: rows.filter(r => r.excluded), ladders, asOf };
 }
 
 function filteredRows() {
-  const { rows } = state.list;
   const f = state.filters;
+  const rows = f.onboarding === 'excluded' ? state.list.excludedRows : state.list.rows;
   const q = f.q.trim().toLowerCase();
   let out = rows.filter(r =>
     (f.type === 'all' || r.type === f.type) &&
@@ -234,7 +235,8 @@ function filteredRows() {
       (f.onboarding === 'complete' && r.onboarding_total > 0 && r.onboarding_done >= r.onboarding_total) ||
       (f.onboarding === 'open' && r.onboarding_done < r.onboarding_total) ||
       (f.onboarding === 'review' && r.pending_review > 0) ||
-      (f.onboarding === 'nobio' && r.bio?.checked && !r.bio.link)));
+      (f.onboarding === 'nobio' && r.bio?.checked && !r.bio.link) ||
+      f.onboarding === 'excluded'));
   const key = f.sort, dir = f.dir === 'asc' ? 1 : -1;
   out.sort((a, b) => {
     const va = a[key], vb = b[key];
@@ -274,6 +276,7 @@ async function renderList() {
         <option value="complete" ${f.onboarding === 'complete' ? 'selected' : ''}>Onboarding completo</option>
         <option value="review" ${f.onboarding === 'review' ? 'selected' : ''}>Con pubblicazioni da verificare</option>
         <option value="nobio" ${f.onboarding === 'nobio' ? 'selected' : ''}>Senza link DeepCharts in bio</option>
+        <option value="excluded" ${f.onboarding === 'excluded' ? 'selected' : ''}>Esclusi dalla tracciabilità (${state.list.excludedRows.length})</option>
       </select>
     </section>
     <section id="summary" class="summary"></section>
@@ -419,11 +422,13 @@ async function renderDetail(id, { partnerView = false } = {}) {
         </p>
       </div>
       <div class="actions">
+        ${isStaff && !partnerView ? `<button class="btn btn-ghost" id="toggle-excluded">${p.excluded ? 'Reincludi nella tracciabilità' : 'Escludi dalla tracciabilità'}</button>` : ''}
         <button class="btn" id="export-pubs">Esporta pubblicazioni</button>
         <button class="btn btn-primary" id="print">Scarica report PDF</button>
       </div>
     </section>
 
+    ${p.excluded ? `<p class="notice notice-excluded">Escluso dalla tracciabilità${p.excluded_reason ? ': ' + esc(p.excluded_reason) : ''}. Non compare in lista, Top 30, Nuovi iscritti, Da attenzionare, Report e Verifica.</p>` : ''}
     <section class="kpis" aria-label="Dati commerciali">
       ${kpi('Fatturato', 'income', v => money(v, cur))}
       ${kpi('Commissioni', 'commissions', v => money(v, cur))}
@@ -552,6 +557,18 @@ async function renderDetail(id, { partnerView = false } = {}) {
     drawPubs();
   }));
 
+  document.getElementById('toggle-excluded')?.addEventListener('click', async () => {
+    let reason = null;
+    if (!p.excluded) {
+      reason = prompt('Perché escludi ' + p.name + ' dalla tracciabilità? (facoltativo)', '');
+      if (reason === null) return;
+    } else if (!confirm('Reincludere ' + p.name + ' in lista, classifiche e report?')) return;
+    const { error } = await sb.from('partners').update({ excluded: !p.excluded, excluded_reason: p.excluded ? null : (reason.trim() || null) }).eq('id', p.id);
+    if (error) return toast('Modifica non salvata: ' + error.message, 'err');
+    toast(p.excluded ? 'Partner reincluso' : 'Partner escluso dalla tracciabilità');
+    state.list = null; state.social = null; state.review = null; state.report = null;
+    renderDetail(id);
+  });
   document.getElementById('print').addEventListener('click', () => window.print());
   document.getElementById('export-pubs').addEventListener('click', () => downloadCsv(
     `pubblicazioni-${(p.affiliate_code || p.name).replace(/[^\w-]+/g, '_')}.csv`,
@@ -797,7 +814,7 @@ async function renderReport() {
 
   // Pubblicazioni negli ultimi N giorni fino a oggi
   const since = new Date(Date.now() - Number(days) * DAY).toISOString();
-  const pubs = R.pubs.filter(x => x.published_at >= since);
+  const pubs = R.pubs.filter(x => x.published_at >= since && byId.has(x.partner_id));
   const count = (list, s) => list.filter(x => x.review_status === s).length;
   const confirmed = pubs.filter(x => x.review_status === 'confirmed');
   const perPartner = new Map();
@@ -945,9 +962,9 @@ async function renderSocial() {
     app.innerHTML = shell('<p class="loading">Caricamento pubblicazioni…</p>');
     bindShell();
     const rows = await fetchAll(() => sb.from('publications')
-      .select('id, partner_id, platform, format, category, published_at, title, url, mention, review_status, partners(name, affiliate_code, type)')
+      .select('id, partner_id, platform, format, category, published_at, title, url, mention, review_status, partners(name, affiliate_code, type, excluded)')
       .order('published_at', { ascending: false }).order('id'));
-    state.social = { rows, f: { platform: 'all', status: 'all', period: '30', format: 'all', q: '' } };
+    state.social = { rows: rows.filter(x => !x.partners?.excluded), f: { platform: 'all', status: 'all', period: '30', format: 'all', q: '' } };
   }
   const { rows: all, f } = state.social;
   const since = f.period === 'all' ? '' : new Date(Date.now() - Number(f.period) * DAY).toISOString();
@@ -1083,9 +1100,9 @@ async function renderReview() {
     app.innerHTML = shell('<p class="loading">Caricamento pubblicazioni da verificare…</p>');
     bindShell();
     const rows = await fetchAll(() => sb.from('publications')
-      .select('id, partner_id, platform, format, category, published_at, title, url, mention, evidence, media_drive_file_id, partners(name, affiliate_code, type)')
+      .select('id, partner_id, platform, format, category, published_at, title, url, mention, evidence, media_drive_file_id, partners(name, affiliate_code, type, excluded)')
       .eq('review_status', 'pending').order('published_at', { ascending: false }).order('id'));
-    state.review = { all: rows, platform: 'all', index: 0, category: null, history: [], done: 0, busy: false };
+    state.review = { all: rows.filter(x => !x.partners?.excluded), platform: 'all', index: 0, category: null, history: [], done: 0, busy: false };
   }
   drawReview();
 }

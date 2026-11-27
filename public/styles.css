@@ -422,3 +422,4 @@ details p { color: var(--muted); }
 .bio-warn { color: #F2B84B; }
 .bio-bad { color: var(--ask); }
 .bio-muted { color: var(--muted); }
+.notice-excluded { border-color: #F2B84B; color: var(--ink); }
